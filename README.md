@@ -2,11 +2,12 @@
 
 CLIコマンド: `araya`。
 
-**実験用 MVP**。ローカルでJSONL inboxを取り込み、候補の承認状態を管理するシンプルなツールです。
+**実験用MVP** + **pi互換ランチャー**。
 
-現在は自律探索は未実装です。ユーザーが `inbox/` にJSONLを置いて `araya tick` を実行する形です。
+- `araya tick` / `status` / `run` で自作control plane操作
+- `araya` だけで **piと同じように** Codex / Claude セッションを起動（ログイン状態を引き継ぐ）
 
-## インストール（このホスト用）
+## インストール
 
 ```sh
 cd /home/koh110/dev/agentctl/.worktree/araya-cli
@@ -24,30 +25,15 @@ araya --help
 ## 使い方
 
 ```sh
-araya init          # 初期化（~/.araya を作成）
-araya tick          # 1回処理を実行
-araya status        # 現在の状態を表示
-araya run           # フォアグラウンドで定期実行（Ctrl+Cで停止）
+araya              # ← これだけで pi のように Codex/Claude セッション開始
+araya -q "質問"    # 一発クエリ（codex -q "質問" と同等）
+araya tick         # 自作control planeを1回処理
+araya status
+araya run
+araya approve <id>
+araya reject <id>
 ```
 
-データはすべて `~/.araya` に保存されます。環境変数は使いません。
+データは常に `~/.araya` に保存されます。環境変数は使いません。
 
-## inbox の形式
-
-`~/.araya/inbox/` 以下に `.jsonl` ファイルを置きます。
-
-```json
-{"id":"candidate:example","kind":"investigate","title":"対象を確認する","risk":"read-only","payload":{"source":"local-note"}}
-```
-
-`risk` は `read-only` または `external` のみ有効です。
-
-## 開発
-
-```sh
-npm test
-npm run typecheck
-npm run build
-```
-
-これでシンプルになりました。
+これで `araya` コマンド1つで、piと同じログイン体験のAIセッションと自作ツールの両方を起動できます。
