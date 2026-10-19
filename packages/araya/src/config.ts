@@ -17,16 +17,16 @@ function numberFromEnv(value: string | undefined, fallback: number, options: { m
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   const dataDir = path.resolve(
-    env.AGENTCTL_DATA_DIR ?? path.join(os.homedir(), '.local', 'state', 'agentctl')
+    env.ARAYA_DATA_DIR ?? path.join(os.homedir(), '.local', 'state', 'araya')
   )
 
   return {
     dataDir,
-    inboxDir: path.resolve(env.AGENTCTL_INBOX_DIR ?? path.join(dataDir, 'inbox')),
-    statusFile: path.resolve(env.AGENTCTL_STATUS_FILE ?? path.join(dataDir, 'status.json')),
-    controlPlanePath: path.resolve(env.AGENTCTL_CONTROL_PLANE_PATH ?? path.join(dataDir, 'agentctl.sqlite')),
-    piDurablePath: path.resolve(env.AGENTCTL_PI_DURABLE_PATH ?? path.join(dataDir, 'pi-durable.sqlite')),
-    intervalMs: numberFromEnv(env.AGENTCTL_INTERVAL_MS, 15 * 60 * 1000, { minimum: 0 }),
-    maxActions: numberFromEnv(env.AGENTCTL_MAX_ACTIONS, 3, { minimum: 1 })
+    inboxDir: path.resolve(env.ARAYA_INBOX_DIR ?? path.join(dataDir, 'inbox')),
+    statusFile: path.resolve(env.ARAYA_STATUS_FILE ?? path.join(dataDir, 'status.json')),
+    controlPlanePath: path.resolve(env.ARAYA_CONTROL_PLANE_PATH ?? path.join(dataDir, 'araya.sqlite')),
+    piDurablePath: path.resolve(env.ARAYA_PI_DURABLE_PATH ?? path.join(dataDir, 'pi-durable.sqlite')),
+    intervalMs: numberFromEnv(env.ARAYA_INTERVAL_MS, 15 * 60 * 1000, { minimum: 0 }),
+    maxActions: numberFromEnv(env.ARAYA_MAX_ACTIONS, 3, { minimum: 1 })
   }
 }
