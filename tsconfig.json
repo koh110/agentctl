@@ -12,8 +12,8 @@
     "target": "esnext"
   },
   "include": [
-    "packages/agentctl/bin/**/*.ts",
-    "packages/agentctl/src/**/*.ts",
-    "packages/agentctl/test/**/*.ts"
+    "packages/araya/bin/**/*.ts",
+    "packages/araya/src/**/*.ts",
+    "packages/araya/test/**/*.ts"
   ]
 }
