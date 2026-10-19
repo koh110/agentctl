@@ -24,22 +24,21 @@ function printHelp(): void {
     control plane と live task graph を読み、status.json へ書き出す。
 
   araya run
-    AGENTCTL_INTERVAL_MS ごとに tick を繰り返す。Ctrl+C で停止する。
+    フォアグラウンドで定期実行（Ctrl+C で停止）。
 
   araya approve <opportunityId> [note...]
-    承認待ち候補を承認する。外部実行はまだ行わない。
+    承認待ち候補を承認する。
 
   araya reject <opportunityId> [note...]
     候補を却下する。
 
-環境変数:
-  AGENTCTL_DATA_DIR
-  AGENTCTL_INBOX_DIR
-  AGENTCTL_STATUS_FILE
-  AGENTCTL_CONTROL_PLANE_PATH
-  AGENTCTL_PI_DURABLE_PATH
-  AGENTCTL_INTERVAL_MS
-  AGENTCTL_MAX_ACTIONS
+  araya hermes
+    Hermes Agent を起動（pi のようにインタラクティブセッションを開始）。
+
+  araya hermes -q "質問"
+    一発クエリでHermesを実行。
+
+環境変数は使いません。データは常に ~/.araya です。
 `)
 }
 
@@ -91,6 +90,25 @@ async function main(): Promise<void> {
       : rejectOpportunity(config, opportunityId, note)
 
     printJson(result)
+    return
+  }
+
+  if (command === 'hermes') {
+    // araya hermes で Hermes Agent を直接起動（piと同じ体験）
+    const spawn = await import('child_process')
+    const hermesArgs = ['chat', ...process.argv.slice(3)]
+
+    console.log('🚀 araya → Hermes Agent を起動します (piと同じようにインタラクティブセッション)...')
+    console.log(`hermes ${hermesArgs.join(' ')}\n`)
+
+    const proc = spawn.spawn('hermes', hermesArgs, {
+      stdio: 'inherit',
+      shell: false
+    })
+
+    proc.on('exit', (code) => {
+      process.exitCode = code ?? 0
+    })
     return
   }
 

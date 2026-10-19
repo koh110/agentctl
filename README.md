@@ -2,11 +2,12 @@
 
 CLIコマンド: `araya`。
 
-**実験用 MVP**。ローカルでJSONL inboxを取り込み、候補の承認状態を管理するシンプルなツールです。
+**実験用MVP** + **Hermes Agentランチャー**。
 
-現在は自律探索は未実装です。ユーザーが `inbox/` にJSONLを置いて `araya tick` を実行する形です。
+- `araya tick` / `status` / `run` で自作のcontrol planeを操作
+- `araya hermes` で **piと同じように** Hermes Agentのインタラクティブセッションを開始
 
-## インストール（このホスト用）
+## インストール
 
 ```sh
 cd /home/koh110/dev/agentctl/.worktree/araya-cli
@@ -24,30 +25,22 @@ araya --help
 ## 使い方
 
 ```sh
-araya init          # 初期化（~/.araya を作成）
-araya tick          # 1回処理を実行
-araya status        # 現在の状態を表示
-araya run           # フォアグラウンドで定期実行（Ctrl+Cで停止）
+araya init          # 初期化
+araya tick          # 自作control planeを1回処理
+araya status        # 状態確認
+araya run           # 自作control planeを常時実行
+
+araya hermes        # ← これでpiと同じようにHermes Agentセッション開始
+araya hermes -q "今日の予定を整理して"
 ```
 
-データはすべて `~/.araya` に保存されます。環境変数は使いません。
+データは常に `~/.araya` に保存されます。環境変数は使いません。
 
-## inbox の形式
+## hermesサブコマンドについて
 
-`~/.araya/inbox/` 以下に `.jsonl` ファイルを置きます。
+`araya hermes` は `hermes chat` を直接呼び出します。
+- 引数なし → インタラクティブセッション（piと同じ体験）
+- `-q "質問"` → 一発クエリ実行
+- その他すべてのHermesフラグ（`--model`, `--profile`, `-s skill` など）がそのまま使えます
 
-```json
-{"id":"candidate:example","kind":"investigate","title":"対象を確認する","risk":"read-only","payload":{"source":"local-note"}}
-```
-
-`risk` は `read-only` または `external` のみ有効です。
-
-## 開発
-
-```sh
-npm test
-npm run typecheck
-npm run build
-```
-
-これでシンプルになりました。
+これで `araya` だけでHermesの常時動作セッションも開始できます。
