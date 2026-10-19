@@ -1,0 +1,15 @@
+{
+  "private": true,
+  "type": "module",
+  "bin": {
+    "agentctl": "./bin/cli.ts"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "dependencies": {
+    "@earendil-works/chord": "1.1.0",
+    "@earendil-works/pi-ai": "1.1.0",
+    "@earendil-works/pi-durable": "1.1.0"
+  }
+}

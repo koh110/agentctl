@@ -1,0 +1,352 @@
+import assert from 'node:assert/strict'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+import test from 'node:test'
+
+import { loadConfig } from '../src/config.ts'
+import { parseCliArguments } from '../src/arguments.ts'
+import { openControlPlane } from '../src/control-plane.ts'
+import { approveOpportunity, initAgentctl, tickAgentctl, statusAgentctl } from '../src/operations.ts'
+import { readObservationSource } from '../src/observations.ts'
+import { MAIN_GOAL_ID } from '../src/runtime.ts'
+
+async function makeConfig(): Promise<{ dir: string; config: ReturnType<typeof loadConfig> }> {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentctl-test-'))
+  const config = loadConfig({
+    AGENTCTL_DATA_DIR: dir,
+    AGENTCTL_INTERVAL_MS: '1000',
+    AGENTCTL_MAX_ACTIONS: '10'
+  })
+
+  return { dir, config }
+}
+
+test('config: retry 制御が未実装なら maxAttempts 設定を公開しない', () => {
+  const config = loadConfig({ AGENTCTL_MAX_ATTEMPTS: '7' })
+
+  assert.equal('maxAttempts' in config, false)
+})
+
+test('CLI arguments: --help は help flag として解析する', () => {
+  assert.deepEqual(parseCliArguments(['--help']), { help: true, positionals: [] })
+})
+
+test('CLI arguments: -- の後ろは dash で始まる note として保持する', () => {
+  assert.deepEqual(
+    parseCliArguments(['approve', 'candidate:note', '--', '-keep-literal']),
+    { help: false, positionals: ['approve', 'candidate:note', '-keep-literal'] }
+  )
+})
+
+test('observations: 有効な JSONL を読み、不正行を errors に分離する', async () => {
+  const { dir } = await makeConfig()
+  const inboxDir = path.join(dir, 'inbox')
+  await fs.mkdir(inboxDir, { recursive: true })
+  await fs.writeFile(
+    path.join(inboxDir, 'observations.jsonl'),
+    [
+      JSON.stringify({ id: 'candidate:a', title: 'A', risk: 'read-only' }),
+      '',
+      JSON.stringify({ id: 'candidate:b', title: 'B', risk: 'external' }),
+      JSON.stringify({ id: 'candidate:c', title: 'C', risk: 'unknown' })
+    ].join('\n'),
+    'utf8'
+  )
+
+  const result = await readObservationSource(inboxDir)
+  assert.equal(result.observations.length, 2)
+  assert.equal(result.observations[0]?.observationId, 'candidate:a')
+  assert.equal(result.observations[1]?.observationId, 'candidate:b')
+  assert.equal(result.errors.length, 1)
+  assert.match(result.errors[0] ?? '', /risk must be read-only or external/u)
+})
+
+test('observations: inbox の読み取りに失敗したら空入力として扱わず error を返す', async () => {
+  const { dir } = await makeConfig()
+  const inboxDir = path.join(dir, 'missing-inbox')
+
+  const result = await readObservationSource(inboxDir)
+
+  assert.deepEqual(result.observations, [])
+  assert.equal(result.errors.length, 1)
+  assert.match(result.errors[0] ?? '', /missing-inbox/u)
+  assert.match(result.errors[0] ?? '', /ENOENT|no such file/u)
+})
+
+test('observations: 個別ファイルの読み取り失敗を記録し、他ファイルの有効行を保つ', async () => {
+  const { dir } = await makeConfig()
+  const inboxDir = path.join(dir, 'inbox')
+  const unreadablePath = path.join(inboxDir, 'z-unreadable.jsonl')
+  await fs.mkdir(inboxDir, { recursive: true })
+  await fs.writeFile(
+    path.join(inboxDir, 'a-valid.jsonl'),
+    `${JSON.stringify({ id: 'candidate:valid', title: 'Valid', risk: 'read-only' })}\n`,
+    'utf8'
+  )
+  await fs.writeFile(unreadablePath, `${JSON.stringify({ id: 'candidate:unreadable', title: 'Unreadable', risk: 'read-only' })}\n`, 'utf8')
+  await fs.chmod(unreadablePath, 0)
+
+  try {
+    const result = await readObservationSource(inboxDir)
+
+    assert.equal(result.observations.length, 1)
+    assert.equal(result.observations[0]?.observationId, 'candidate:valid')
+    assert.equal(result.errors.length, 1)
+    assert.match(result.errors[0] ?? '', /z-unreadable\.jsonl/u)
+    assert.match(result.errors[0] ?? '', /EACCES|permission denied/u)
+  } finally {
+    await fs.chmod(unreadablePath, 0o600)
+  }
+})
+
+test('init: seed は汎用例のみで、個人のissue参照を含めない', async () => {
+  const { config } = await makeConfig()
+
+  await initAgentctl(config)
+
+  const seed = await fs.readFile(path.join(config.inboxDir, 'seed.jsonl'), 'utf8')
+  assert.equal(seed.trim().split('\n').length, 3)
+  assert.doesNotMatch(seed, /memo|agentctl#1/u)
+})
+
+test('init: 既存の seed inbox を上書きしない', async () => {
+  const { config } = await makeConfig()
+  await fs.mkdir(config.inboxDir, { recursive: true })
+  const seedPath = path.join(config.inboxDir, 'seed.jsonl')
+  const existing = `${JSON.stringify({ id: 'candidate:custom', title: '保持する候補', risk: 'read-only' })}\n`
+  await fs.writeFile(seedPath, existing, 'utf8')
+
+  await initAgentctl(config)
+
+  assert.equal(await fs.readFile(seedPath, 'utf8'), existing)
+})
+
+test('control plane: startOpportunities は既存候補を scouting へ更新する', async () => {
+  const { dir } = await makeConfig()
+  const controlPlane = openControlPlane(path.join(dir, 'agentctl.sqlite'))
+  const now = 1000
+
+  try {
+    controlPlane.ensureGoal(MAIN_GOAL_ID, 'test goal', 1000, now)
+    controlPlane.recordObservationBatch(
+      [{ observationId: 'candidate:start', kind: 'investigate', title: 'Start', risk: 'read-only', payload: {} }],
+      MAIN_GOAL_ID,
+      now
+    )
+
+    controlPlane.startOpportunities(['candidate:start'], now + 1)
+
+    const opportunity = controlPlane.getOpportunity('candidate:start')
+    assert.equal(opportunity?.status, 'scouting')
+    assert.equal(opportunity?.attemptCount, 1)
+    assert.equal(
+      controlPlane.summarize(10).events.filter((event) => event.type === 'opportunity.scouting').length,
+      1
+    )
+  } finally {
+    controlPlane.close()
+  }
+})
+
+test('control plane: startOpportunities は存在しない候補を拒否する', async () => {
+  const { dir } = await makeConfig()
+  const controlPlane = openControlPlane(path.join(dir, 'agentctl.sqlite'))
+
+  try {
+    assert.throws(
+      () => controlPlane.startOpportunities(['candidate:missing'], 1000),
+      /opportunity not found: candidate:missing/u
+    )
+    assert.equal(
+      controlPlane.summarize(10).events.some((event) => event.type === 'opportunity.scouting'),
+      false
+    )
+  } finally {
+    controlPlane.close()
+  }
+})
+
+test('control plane: 同一 observation の再投入で opportunity を増殖させない', async () => {
+  const { dir } = await makeConfig()
+  const controlPlane = openControlPlane(path.join(dir, 'agentctl.sqlite'))
+  const now = 1000
+
+  controlPlane.ensureGoal(MAIN_GOAL_ID, 'test goal', 1000, now)
+
+  const first = controlPlane.recordObservationBatch(
+    [{ observationId: 'candidate:once', kind: 'investigate', title: 'Once', risk: 'read-only', payload: {} }],
+    MAIN_GOAL_ID,
+    now
+  )
+  const second = controlPlane.recordObservationBatch(
+    [{ observationId: 'candidate:once', kind: 'investigate', title: 'Once', risk: 'read-only', payload: {} }],
+    MAIN_GOAL_ID,
+    now + 1
+  )
+
+  assert.deepEqual(first, ['candidate:once'])
+  assert.deepEqual(second, [])
+  assert.equal(controlPlane.countOpportunities().discovered, 1)
+
+  controlPlane.close()
+})
+
+test('tick: 個別 inbox 読取エラーを記録し、有効候補の処理を続ける', async () => {
+  const { config } = await makeConfig()
+  await fs.mkdir(config.inboxDir, { recursive: true })
+  const unreadablePath = path.join(config.inboxDir, 'z-unreadable.jsonl')
+  await fs.writeFile(
+    path.join(config.inboxDir, 'a-valid.jsonl'),
+    `${JSON.stringify({ id: 'candidate:valid', title: 'Valid', risk: 'read-only', payload: {} })}\n`,
+    'utf8'
+  )
+  await fs.writeFile(unreadablePath, `${JSON.stringify({ id: 'candidate:unreadable', title: 'Unreadable', risk: 'read-only', payload: {} })}\n`, 'utf8')
+  await fs.chmod(unreadablePath, 0)
+
+  try {
+    await tickAgentctl(config)
+
+    const status = await statusAgentctl(config)
+    assert.equal(status.controlPlane.opportunityCounts.blocked, 1)
+    const errorEvent = status.controlPlane.events.find((event) => event.type === 'inbox.read_errors')
+    assert.ok(errorEvent)
+    assert.match(JSON.stringify(errorEvent.data.errors), /z-unreadable\.jsonl/u)
+  } finally {
+    await fs.chmod(unreadablePath, 0o600)
+  }
+})
+
+test('tick: read-only 候補は executor 不在で blocked になり、external 候補は承認待ちになる', async () => {
+  const { dir, config } = await makeConfig()
+  await fs.mkdir(config.inboxDir, { recursive: true })
+  await fs.writeFile(
+    path.join(config.inboxDir, 'observations.jsonl'),
+    [
+      JSON.stringify({ id: 'candidate:read-only', title: '読むだけ', risk: 'read-only', payload: { source: 'test' } }),
+      JSON.stringify({ id: 'candidate:external', title: '外部実行', risk: 'external', payload: { source: 'test' } })
+    ].join('\n'),
+    'utf8'
+  )
+
+  const tickResult = await tickAgentctl(config)
+  assert.equal(tickResult.status, 'due')
+  assert.equal(tickResult.settled?.state.outcome.status, 'completed')
+
+  const status = await statusAgentctl(config)
+  assert.equal(status.controlPlane.opportunityCounts.completed, undefined)
+  assert.equal(status.controlPlane.opportunityCounts.blocked, 1)
+  assert.equal(status.controlPlane.opportunityCounts.approval_requested, 1)
+  assert.equal(status.controlPlane.blocked[0]?.id, 'candidate:read-only')
+  assert.equal(status.controlPlane.pendingApprovals[0]?.id, 'candidate:external')
+  assert.equal(status.activeTasks.length, 0)
+})
+
+test('tick: 次回起床前なら idle とし、task を増殖させない', async () => {
+  const { dir, config } = await makeConfig()
+  await fs.mkdir(config.inboxDir, { recursive: true })
+  await fs.writeFile(
+    path.join(config.inboxDir, 'observations.jsonl'),
+    JSON.stringify({ id: 'candidate:idle', title: 'Idle', risk: 'read-only', payload: {} }),
+    'utf8'
+  )
+
+  const first = await tickAgentctl(config)
+  assert.equal(first.status, 'due')
+
+  const second = await tickAgentctl(config)
+  assert.equal(second.status, 'idle')
+
+  const status = await statusAgentctl(config)
+  assert.equal(status.controlPlane.opportunityCounts.completed, undefined)
+  assert.equal(status.controlPlane.opportunityCounts.blocked, 1)
+  assert.equal(status.controlPlane.blocked[0]?.id, 'candidate:idle')
+  assert.equal(status.activeTasks.length, 0)
+})
+
+test('approve: 承認した external 候補は次回 tick で no-executor blocked になる', async () => {
+  const { dir, config } = await makeConfig()
+  await fs.mkdir(config.inboxDir, { recursive: true })
+  await fs.writeFile(
+    path.join(config.inboxDir, 'observations.jsonl'),
+    JSON.stringify({ id: 'candidate:approval', title: '承認後', risk: 'external', payload: {} }),
+    'utf8'
+  )
+
+  await tickAgentctl(config)
+  const decision = approveOpportunity(config, 'candidate:approval', 'test approval')
+  assert.equal(decision.decision, 'approved')
+
+  const controlPlane = openControlPlane(config.controlPlanePath)
+  controlPlane.markGoalWake(MAIN_GOAL_ID, Date.now(), 0)
+  controlPlane.close()
+
+  const tickResult = await tickAgentctl(config)
+  assert.equal(tickResult.status, 'due')
+
+  const status = await statusAgentctl(config)
+  assert.equal(status.controlPlane.opportunityCounts.blocked, 1)
+  assert.equal(status.controlPlane.pendingApprovals.length, 0)
+})
+
+test('tick: approval outbox 書込失敗後の再試行で候補と通知を回復する', async () => {
+  const { config } = await makeConfig()
+  await fs.mkdir(config.inboxDir, { recursive: true })
+  await fs.writeFile(
+    path.join(config.inboxDir, 'external.jsonl'),
+    `${JSON.stringify({ id: 'candidate:approval-retry', title: '承認通知', risk: 'external', payload: {} })}\n`,
+    'utf8'
+  )
+
+  const failingControlPlane = openControlPlane(config.controlPlanePath)
+  failingControlPlane.db.exec(`
+    CREATE TRIGGER fail_outbox_insert
+    BEFORE INSERT ON outbox
+    BEGIN
+      SELECT RAISE(ABORT, 'forced outbox insert failure');
+    END;
+  `)
+  failingControlPlane.close()
+
+  await tickAgentctl(config)
+
+  const afterFailure = await statusAgentctl(config)
+  assert.equal(afterFailure.controlPlane.opportunityCounts.scouting, 1)
+  assert.equal(afterFailure.controlPlane.pendingOutbox.length, 0)
+
+  const recoveryControlPlane = openControlPlane(config.controlPlanePath)
+  recoveryControlPlane.db.exec('DROP TRIGGER fail_outbox_insert')
+  recoveryControlPlane.markGoalWake(MAIN_GOAL_ID, Date.now(), 0)
+  recoveryControlPlane.close()
+
+  await tickAgentctl(config)
+
+  const recovered = await statusAgentctl(config)
+  assert.equal(recovered.controlPlane.opportunityCounts.approval_requested, 1)
+  assert.deepEqual(
+    recovered.controlPlane.pendingOutbox.map(({ id, topic, status }) => ({ id, topic, status })),
+    [{ id: 'approval-request:candidate:approval-retry', topic: 'discord.approval', status: 'pending' }]
+  )
+})
+
+test('tick: outbox は通知が実配信されるまで pending のまま保持する', async () => {
+  const { dir, config } = await makeConfig()
+  await fs.mkdir(config.inboxDir, { recursive: true })
+  await fs.writeFile(
+    path.join(config.inboxDir, 'observations.jsonl'),
+    JSON.stringify({ id: 'candidate:outbox', title: '通知待ち', risk: 'external', payload: {} }),
+    'utf8'
+  )
+
+  await tickAgentctl(config)
+
+  const status = await statusAgentctl(config)
+  assert.deepEqual(
+    status.controlPlane.pendingOutbox.map(({ id, topic, status: deliveryStatus }) => ({
+      id,
+      topic,
+      status: deliveryStatus
+    })),
+    [{ id: 'approval-request:candidate:outbox', topic: 'discord.approval', status: 'pending' }]
+  )
+})
