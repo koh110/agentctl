@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "allowImportingTsExtensions": true,
+    "noEmit": false,
+    "outDir": "packages/agentctl/dist",
+    "rootDir": "packages/agentctl",
+    "rewriteRelativeImportExtensions": true
+  },
+  "include": [
+    "packages/agentctl/bin/**/*.ts",
+    "packages/agentctl/src/**/*.ts"
+  ]
+}

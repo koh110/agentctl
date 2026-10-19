@@ -1,0 +1,24 @@
+{
+  "private": true,
+  "name": "agentctl",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "araya": "./dist/bin/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "build": "tsc -p ../../tsconfig.build.json",
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "@earendil-works/chord": "1.1.0",
+    "@earendil-works/pi-ai": "1.1.0",
+    "@earendil-works/pi-durable": "1.1.0"
+  }
+}
