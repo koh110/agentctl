@@ -22,7 +22,7 @@ async function makeConfig(): Promise<{ dir: string; config: ReturnType<typeof lo
   return { dir, config }
 }
 
-test('config: retry 制御が未実装なら maxAttempts 設定を公開しない', () => {
+test('config: retry制御は未実装のため maxAttempts を公開しない', () => {
   const config = loadConfig({ AGENTCTL_MAX_ATTEMPTS: '7' })
 
   assert.equal('maxAttempts' in config, false)
