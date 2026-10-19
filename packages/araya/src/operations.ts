@@ -6,10 +6,10 @@ import type { SettledTask } from '@earendil-works/pi-durable'
 
 import { loadConfig } from './config.ts'
 import { openControlPlane, type OpportunitySummary } from './control-plane.ts'
-import { ensureScoutTask, openAgentctlRuntime, MAIN_GOAL_ID, readTaskGraph } from './runtime.ts'
+import { ensureScoutTask, openArayaRuntime, MAIN_GOAL_ID, readTaskGraph } from './runtime.ts'
 import { TASK_NAMES, type ScoutResult } from './tasks.ts'
 
-export type AgentctlConfig = ReturnType<typeof loadConfig>
+export type ArayaConfig = ReturnType<typeof loadConfig>
 
 export type StatusSnapshot = {
   capturedAt: number
@@ -42,7 +42,7 @@ export type TickResult = {
   error?: string
 }
 
-function publicConfig(config: AgentctlConfig) {
+function publicConfig(config: ArayaConfig) {
   return {
     dataDir: config.dataDir,
     inboxDir: config.inboxDir,
@@ -54,13 +54,13 @@ function publicConfig(config: AgentctlConfig) {
   }
 }
 
-export async function writeStatusFile(config: AgentctlConfig, snapshot: StatusSnapshot): Promise<void> {
+export async function writeStatusFile(config: ArayaConfig, snapshot: StatusSnapshot): Promise<void> {
   await fs.mkdir(path.dirname(config.statusFile), { recursive: true })
   await fs.writeFile(config.statusFile, `${JSON.stringify(snapshot, null, 2)}\n`, 'utf8')
 }
 
-async function collectStatus(config: AgentctlConfig, capturedAt = Date.now()): Promise<StatusSnapshot> {
-  const runtime = await openAgentctlRuntime(config)
+async function collectStatus(config: ArayaConfig, capturedAt = Date.now()): Promise<StatusSnapshot> {
+  const runtime = await openArayaRuntime(config)
 
   try {
     const graphState = await readTaskGraph(runtime.harness)
@@ -89,14 +89,14 @@ async function collectStatus(config: AgentctlConfig, capturedAt = Date.now()): P
   }
 }
 
-export async function statusAgentctl(config: AgentctlConfig): Promise<StatusSnapshot> {
+export async function statusAraya(config: ArayaConfig): Promise<StatusSnapshot> {
   const snapshot = await collectStatus(config)
   await writeStatusFile(config, snapshot)
 
   return snapshot
 }
 
-export async function initAgentctl(config: AgentctlConfig): Promise<StatusSnapshot> {
+export async function initAraya(config: ArayaConfig): Promise<StatusSnapshot> {
   await fs.mkdir(config.inboxDir, { recursive: true })
   await fs.mkdir(path.dirname(config.statusFile), { recursive: true })
 
@@ -146,7 +146,7 @@ export async function initAgentctl(config: AgentctlConfig): Promise<StatusSnapsh
     }
   }
 
-  const runtime = await openAgentctlRuntime(config)
+  const runtime = await openArayaRuntime(config)
 
   try {
     runtime.controlPlane.ensureGoal(MAIN_GOAL_ID, '常時 scout', config.intervalMs, Date.now())
@@ -154,13 +154,13 @@ export async function initAgentctl(config: AgentctlConfig): Promise<StatusSnapsh
     await runtime.close()
   }
 
-  return statusAgentctl(config)
+  return statusAraya(config)
 }
 
-export async function tickAgentctl(config: AgentctlConfig): Promise<TickResult> {
+export async function tickAraya(config: ArayaConfig): Promise<TickResult> {
   const now = Date.now()
   const tickId = `tick:${now}`
-  const runtime = await openAgentctlRuntime(config)
+  const runtime = await openArayaRuntime(config)
 
   try {
     runtime.controlPlane.ensureGoal(MAIN_GOAL_ID, '常時 scout', config.intervalMs, now)
@@ -211,7 +211,7 @@ export async function tickAgentctl(config: AgentctlConfig): Promise<TickResult> 
   }
 }
 
-export async function runAgentctl(config: AgentctlConfig): Promise<void> {
+export async function runAraya(config: ArayaConfig): Promise<void> {
   let stopped = false
 
   const stop = () => {
@@ -222,7 +222,7 @@ export async function runAgentctl(config: AgentctlConfig): Promise<void> {
   process.once('SIGTERM', stop)
 
   while (!stopped) {
-    const result = await tickAgentctl(config)
+    const result = await tickAraya(config)
     const snapshot = await collectStatus(config, Date.now())
     await writeStatusFile(config, { ...snapshot, tick: result })
 
@@ -234,7 +234,7 @@ export async function runAgentctl(config: AgentctlConfig): Promise<void> {
   }
 }
 
-export function approveOpportunity(config: AgentctlConfig, opportunityId: string, note: string) {
+export function approveOpportunity(config: ArayaConfig, opportunityId: string, note: string) {
   const controlPlane = openControlPlane(config.controlPlanePath)
 
   try {
@@ -244,7 +244,7 @@ export function approveOpportunity(config: AgentctlConfig, opportunityId: string
   }
 }
 
-export function rejectOpportunity(config: AgentctlConfig, opportunityId: string, note: string) {
+export function rejectOpportunity(config: ArayaConfig, opportunityId: string, note: string) {
   const controlPlane = openControlPlane(config.controlPlanePath)
 
   try {

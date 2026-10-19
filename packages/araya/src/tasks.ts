@@ -5,8 +5,8 @@ import type { ControlPlane } from './control-plane.ts'
 import { readObservationSource } from './observations.ts'
 
 export const TASK_NAMES = {
-  scout: 'agentctl.scout',
-  work: 'agentctl.work'
+  scout: 'araya.scout',
+  work: 'araya.work'
 } as const
 
 export type ScoutInput = {
@@ -51,7 +51,7 @@ export type WorkState = {
 export type ScoutTaskType = ReturnType<typeof createScoutTask>
 export type WorkTaskType = ReturnType<typeof createWorkTask>
 
-export type AgentctlTasks = {
+export type ArayaTasks = {
   ScoutTask: ScoutTaskType
   WorkTask: WorkTaskType
 }
@@ -123,7 +123,7 @@ export function createWorkTask(controlPlane: ControlPlane) {
 
             controlPlane.requestApproval(
               opportunity.id,
-              `agentctl 承認待ち: ${opportunity.title}`,
+              `araya 承認待ち: ${opportunity.title}`,
               now
             )
 
@@ -157,7 +157,7 @@ export function createWorkTask(controlPlane: ControlPlane) {
 
             controlPlane.requestApproval(
               opportunity.id,
-              `agentctl 承認待ち: ${opportunity.title}`,
+              `araya 承認待ち: ${opportunity.title}`,
               now
             )
 
@@ -218,7 +218,7 @@ export function createWorkTask(controlPlane: ControlPlane) {
           status: 'terminal',
           outcome: {
             status: 'aborted',
-            reason: 'agentctl work task aborted'
+            reason: 'araya work task aborted'
           }
         }),
         context
@@ -335,7 +335,7 @@ export function createScoutTask(
           status: 'terminal',
           outcome: {
             status: 'aborted',
-            reason: 'agentctl scout task aborted'
+            reason: 'araya scout task aborted'
           }
         }),
         context
@@ -346,12 +346,12 @@ export function createScoutTask(
   return ScoutTask
 }
 
-export function createAgentctlTasks(
+export function createArayaTasks(
   controlPlane: ControlPlane,
   inboxDir: string,
   goalId: string,
   goalIntervalMs: number
-): AgentctlTasks {
+): ArayaTasks {
   const WorkTask = createWorkTask(controlPlane)
   const ScoutTask = createScoutTask(controlPlane, WorkTask, inboxDir, goalId, goalIntervalMs)
 

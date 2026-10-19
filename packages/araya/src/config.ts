@@ -17,7 +17,7 @@ function numberFromEnv(value: string | undefined, fallback: number, options: { m
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   const dataDir = path.resolve(
-    env.ARAYA_DATA_DIR ?? path.join(os.homedir(), '.local', 'state', 'araya')
+    env.ARAYA_DATA_DIR ?? path.join(os.homedir(), '.araya')
   )
 
   return {

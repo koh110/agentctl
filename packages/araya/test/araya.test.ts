@@ -7,23 +7,23 @@ import test from 'node:test'
 import { loadConfig } from '../src/config.ts'
 import { parseCliArguments } from '../src/arguments.ts'
 import { openControlPlane } from '../src/control-plane.ts'
-import { approveOpportunity, initAgentctl, tickAgentctl, statusAgentctl } from '../src/operations.ts'
+import { approveOpportunity, initAraya, tickAraya, statusAraya } from '../src/operations.ts'
 import { readObservationSource } from '../src/observations.ts'
 import { MAIN_GOAL_ID } from '../src/runtime.ts'
 
 async function makeConfig(): Promise<{ dir: string; config: ReturnType<typeof loadConfig> }> {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'agentctl-test-'))
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'araya-test-'))
   const config = loadConfig({
-    AGENTCTL_DATA_DIR: dir,
-    AGENTCTL_INTERVAL_MS: '1000',
-    AGENTCTL_MAX_ACTIONS: '10'
+    ARAYA_DATA_DIR: dir,
+    ARAYA_INTERVAL_MS: '1000',
+    ARAYA_MAX_ACTIONS: '10'
   })
 
   return { dir, config }
 }
 
 test('config: retry制御は未実装のため maxAttempts を公開しない', () => {
-  const config = loadConfig({ AGENTCTL_MAX_ATTEMPTS: '7' })
+  const config = loadConfig({ ARAYA_MAX_ATTEMPTS: '7' })
 
   assert.equal('maxAttempts' in config, false)
 })
@@ -103,11 +103,11 @@ test('observations: 個別ファイルの読み取り失敗を記録し、他フ
 test('init: seed は汎用例のみで、個人のissue参照を含めない', async () => {
   const { config } = await makeConfig()
 
-  await initAgentctl(config)
+  await initAraya(config)
 
   const seed = await fs.readFile(path.join(config.inboxDir, 'seed.jsonl'), 'utf8')
   assert.equal(seed.trim().split('\n').length, 3)
-  assert.doesNotMatch(seed, /memo|agentctl#1/u)
+  assert.doesNotMatch(seed, /memo|araya#1/u)
 })
 
 test('init: 既存の seed inbox を上書きしない', async () => {
@@ -117,14 +117,14 @@ test('init: 既存の seed inbox を上書きしない', async () => {
   const existing = `${JSON.stringify({ id: 'candidate:custom', title: '保持する候補', risk: 'read-only' })}\n`
   await fs.writeFile(seedPath, existing, 'utf8')
 
-  await initAgentctl(config)
+  await initAraya(config)
 
   assert.equal(await fs.readFile(seedPath, 'utf8'), existing)
 })
 
 test('control plane: startOpportunities は既存候補を scouting へ更新する', async () => {
   const { dir } = await makeConfig()
-  const controlPlane = openControlPlane(path.join(dir, 'agentctl.sqlite'))
+  const controlPlane = openControlPlane(path.join(dir, 'araya.sqlite'))
   const now = 1000
 
   try {
@@ -151,7 +151,7 @@ test('control plane: startOpportunities は既存候補を scouting へ更新す
 
 test('control plane: startOpportunities は存在しない候補を拒否する', async () => {
   const { dir } = await makeConfig()
-  const controlPlane = openControlPlane(path.join(dir, 'agentctl.sqlite'))
+  const controlPlane = openControlPlane(path.join(dir, 'araya.sqlite'))
 
   try {
     assert.throws(
@@ -169,7 +169,7 @@ test('control plane: startOpportunities は存在しない候補を拒否する'
 
 test('control plane: 同一 observation の再投入で opportunity を増殖させない', async () => {
   const { dir } = await makeConfig()
-  const controlPlane = openControlPlane(path.join(dir, 'agentctl.sqlite'))
+  const controlPlane = openControlPlane(path.join(dir, 'araya.sqlite'))
   const now = 1000
 
   controlPlane.ensureGoal(MAIN_GOAL_ID, 'test goal', 1000, now)
@@ -205,9 +205,9 @@ test('tick: 個別 inbox 読取エラーを記録し、有効候補の処理を�
   await fs.chmod(unreadablePath, 0)
 
   try {
-    await tickAgentctl(config)
+    await tickAraya(config)
 
-    const status = await statusAgentctl(config)
+    const status = await statusAraya(config)
     assert.equal(status.controlPlane.opportunityCounts.blocked, 1)
     const errorEvent = status.controlPlane.events.find((event) => event.type === 'inbox.read_errors')
     assert.ok(errorEvent)
@@ -229,11 +229,11 @@ test('tick: read-only 候補は executor 不在で blocked になり、external 
     'utf8'
   )
 
-  const tickResult = await tickAgentctl(config)
+  const tickResult = await tickAraya(config)
   assert.equal(tickResult.status, 'due')
   assert.equal(tickResult.settled?.state.outcome.status, 'completed')
 
-  const status = await statusAgentctl(config)
+  const status = await statusAraya(config)
   assert.equal(status.controlPlane.opportunityCounts.completed, undefined)
   assert.equal(status.controlPlane.opportunityCounts.blocked, 1)
   assert.equal(status.controlPlane.opportunityCounts.approval_requested, 1)
@@ -251,13 +251,13 @@ test('tick: 次回起床前なら idle とし、task を増殖させない', asy
     'utf8'
   )
 
-  const first = await tickAgentctl(config)
+  const first = await tickAraya(config)
   assert.equal(first.status, 'due')
 
-  const second = await tickAgentctl(config)
+  const second = await tickAraya(config)
   assert.equal(second.status, 'idle')
 
-  const status = await statusAgentctl(config)
+  const status = await statusAraya(config)
   assert.equal(status.controlPlane.opportunityCounts.completed, undefined)
   assert.equal(status.controlPlane.opportunityCounts.blocked, 1)
   assert.equal(status.controlPlane.blocked[0]?.id, 'candidate:idle')
@@ -273,7 +273,7 @@ test('approve: 承認した external 候補は次回 tick で no-executor blocke
     'utf8'
   )
 
-  await tickAgentctl(config)
+  await tickAraya(config)
   const decision = approveOpportunity(config, 'candidate:approval', 'test approval')
   assert.equal(decision.decision, 'approved')
 
@@ -281,10 +281,10 @@ test('approve: 承認した external 候補は次回 tick で no-executor blocke
   controlPlane.markGoalWake(MAIN_GOAL_ID, Date.now(), 0)
   controlPlane.close()
 
-  const tickResult = await tickAgentctl(config)
+  const tickResult = await tickAraya(config)
   assert.equal(tickResult.status, 'due')
 
-  const status = await statusAgentctl(config)
+  const status = await statusAraya(config)
   assert.equal(status.controlPlane.opportunityCounts.blocked, 1)
   assert.equal(status.controlPlane.pendingApprovals.length, 0)
 })
@@ -308,9 +308,9 @@ test('tick: approval outbox 書込失敗後の再試行で候補と通知を回�
   `)
   failingControlPlane.close()
 
-  await tickAgentctl(config)
+  await tickAraya(config)
 
-  const afterFailure = await statusAgentctl(config)
+  const afterFailure = await statusAraya(config)
   assert.equal(afterFailure.controlPlane.opportunityCounts.scouting, 1)
   assert.equal(afterFailure.controlPlane.pendingOutbox.length, 0)
 
@@ -319,9 +319,9 @@ test('tick: approval outbox 書込失敗後の再試行で候補と通知を回�
   recoveryControlPlane.markGoalWake(MAIN_GOAL_ID, Date.now(), 0)
   recoveryControlPlane.close()
 
-  await tickAgentctl(config)
+  await tickAraya(config)
 
-  const recovered = await statusAgentctl(config)
+  const recovered = await statusAraya(config)
   assert.equal(recovered.controlPlane.opportunityCounts.approval_requested, 1)
   assert.deepEqual(
     recovered.controlPlane.pendingOutbox.map(({ id, topic, status }) => ({ id, topic, status })),
@@ -338,9 +338,9 @@ test('tick: outbox は通知が実配信されるまで pending のまま保持�
     'utf8'
   )
 
-  await tickAgentctl(config)
+  await tickAraya(config)
 
-  const status = await statusAgentctl(config)
+  const status = await statusAraya(config)
   assert.deepEqual(
     status.controlPlane.pendingOutbox.map(({ id, topic, status: deliveryStatus }) => ({
       id,

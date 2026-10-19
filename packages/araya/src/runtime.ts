@@ -13,13 +13,13 @@ import {
 } from '@earendil-works/pi-durable'
 
 import { openControlPlane, type ControlPlane } from './control-plane.ts'
-import { createAgentctlTasks, TASK_NAMES, type AgentctlTasks, type ScoutInput, type ScoutResult } from './tasks.ts'
+import { createArayaTasks, TASK_NAMES, type ArayaTasks, type ScoutInput, type ScoutResult } from './tasks.ts'
 
-export const MAIN_GOAL_ID = 'agentctl:goal:main'
+export const MAIN_GOAL_ID = 'araya:goal:main'
 
-export type AgentctlRuntime = {
+export type ArayaRuntime = {
   controlPlane: ControlPlane
-  tasks: AgentctlTasks
+  tasks: ArayaTasks
   harness: Harness
   root: Awaited<ReturnType<Harness['root']>>
   close: () => Promise<void>
@@ -29,19 +29,19 @@ async function ensureParentDir(filePath: string): Promise<void> {
   await fs.mkdir(path.dirname(filePath), { recursive: true })
 }
 
-export async function openAgentctlRuntime(
+export async function openArayaRuntime(
   config: {
     controlPlanePath: string
     inboxDir: string
     piDurablePath: string
     intervalMs: number
   }
-): Promise<AgentctlRuntime> {
+): Promise<ArayaRuntime> {
   await ensureParentDir(config.controlPlanePath)
   await ensureParentDir(config.piDurablePath)
 
   const controlPlane = openControlPlane(config.controlPlanePath)
-  const tasks = createAgentctlTasks(
+  const tasks = createArayaTasks(
     controlPlane,
     config.inboxDir,
     MAIN_GOAL_ID,
@@ -54,7 +54,7 @@ export async function openAgentctlRuntime(
 
   registry.install(
     defineExtension({
-      name: 'agentctl',
+      name: 'araya',
       tasks: [tasks.ScoutTask, tasks.WorkTask]
     })
   )
@@ -91,7 +91,7 @@ export async function readTaskGraph(harness: Harness): Promise<AttachedReplicate
 }
 
 export async function ensureScoutTask(
-  runtime: AgentctlRuntime,
+  runtime: ArayaRuntime,
   input: ScoutInput,
   context: Context = BACKGROUND_CONTEXT
 ): Promise<TaskId<ScoutResult>> {

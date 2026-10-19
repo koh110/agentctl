@@ -3,43 +3,43 @@ import { parseCliArguments } from '../src/arguments.ts'
 import { loadConfig } from '../src/config.ts'
 import {
   approveOpportunity,
-  initAgentctl,
+  initAraya,
   rejectOpportunity,
-  runAgentctl,
-  statusAgentctl,
-  tickAgentctl
+  runAraya,
+  statusAraya,
+  tickAraya
 } from '../src/operations.ts'
 
 function printHelp(): void {
-  console.log(`agentctl MVP
+  console.log(`araya MVP
 
 使い方:
-  agentctl init
+  araya init
     状態領域と seed inbox を作成し、初期状態を status.json へ書き出す。
 
-  agentctl tick
+  araya tick
     1回だけ due goal を処理し、Scout task を完了まで待つ。
 
-  agentctl status
+  araya status
     control plane と live task graph を読み、status.json へ書き出す。
 
-  agentctl run
-    AGENTCTL_INTERVAL_MS ごとに tick を繰り返す。Ctrl+C で停止する。
+  araya run
+    ARAYA_INTERVAL_MS ごとに tick を繰り返す。Ctrl+C で停止する。
 
-  agentctl approve <opportunityId> [note...]
+  araya approve <opportunityId> [note...]
     承認待ち候補を承認する。外部実行はまだ行わない。
 
-  agentctl reject <opportunityId> [note...]
+  araya reject <opportunityId> [note...]
     候補を却下する。
 
 環境変数:
-  AGENTCTL_DATA_DIR
-  AGENTCTL_INBOX_DIR
-  AGENTCTL_STATUS_FILE
-  AGENTCTL_CONTROL_PLANE_PATH
-  AGENTCTL_PI_DURABLE_PATH
-  AGENTCTL_INTERVAL_MS
-  AGENTCTL_MAX_ACTIONS
+  ARAYA_DATA_DIR
+  ARAYA_INBOX_DIR
+  ARAYA_STATUS_FILE
+  ARAYA_CONTROL_PLANE_PATH
+  ARAYA_PI_DURABLE_PATH
+  ARAYA_INTERVAL_MS
+  ARAYA_MAX_ACTIONS
 `)
 }
 
@@ -59,22 +59,22 @@ async function main(): Promise<void> {
   const config = loadConfig()
 
   if (command === 'init') {
-    printJson(await initAgentctl(config))
+    printJson(await initAraya(config))
     return
   }
 
   if (command === 'tick') {
-    printJson(await tickAgentctl(config))
+    printJson(await tickAraya(config))
     return
   }
 
   if (command === 'status') {
-    printJson(await statusAgentctl(config))
+    printJson(await statusAraya(config))
     return
   }
 
   if (command === 'run') {
-    await runAgentctl(config)
+    await runAraya(config)
     return
   }
 
