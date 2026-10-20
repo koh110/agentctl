@@ -14,6 +14,10 @@ function printHelp(): void {
   console.log(`araya MVP
 
 使い方:
+  araya
+    引数なし: 常時起動。ARAYA_INTERVAL_MS ごとに tick を実行する（run と同じ）。
+    pi の scout task が起動する。Ctrl+C で停止する。
+
   araya init
     状態領域と seed inbox を作成し、初期状態を status.json へ書き出す。
 
@@ -49,7 +53,7 @@ function printJson(value: unknown): void {
 
 async function main(): Promise<void> {
   const { help, positionals } = parseCliArguments(process.argv.slice(2))
-  const command = positionals[0] ?? 'help'
+  const command = positionals[0] ?? 'run'
 
   if (help || command === 'help') {
     printHelp()
