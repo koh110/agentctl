@@ -35,7 +35,8 @@ export async function openArayaRuntime(
     inboxDir: string
     piDurablePath: string
     intervalMs: number
-  }
+  },
+  options: { resumeTasks?: boolean } = {}
 ): Promise<ArayaRuntime> {
   await ensureParentDir(config.controlPlanePath)
   await ensureParentDir(config.piDurablePath)
@@ -71,7 +72,9 @@ export async function openArayaRuntime(
     BACKGROUND_CONTEXT
   )
 
-  await harness.resume()
+  if (options.resumeTasks !== false) {
+    await harness.resume()
+  }
   const root = await harness.root(BACKGROUND_CONTEXT)
 
   return {

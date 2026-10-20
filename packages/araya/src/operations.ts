@@ -60,7 +60,7 @@ export async function writeStatusFile(config: ArayaConfig, snapshot: StatusSnaps
 }
 
 async function collectStatus(config: ArayaConfig, capturedAt = Date.now()): Promise<StatusSnapshot> {
-  const runtime = await openArayaRuntime(config)
+  const runtime = await openArayaRuntime(config, { resumeTasks: false })
 
   try {
     const graphState = await readTaskGraph(runtime.harness)
@@ -146,7 +146,7 @@ export async function initAraya(config: ArayaConfig): Promise<StatusSnapshot> {
     }
   }
 
-  const runtime = await openArayaRuntime(config)
+  const runtime = await openArayaRuntime(config, { resumeTasks: false })
 
   try {
     runtime.controlPlane.ensureGoal(MAIN_GOAL_ID, '常時 scout', config.intervalMs, Date.now())

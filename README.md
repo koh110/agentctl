@@ -2,11 +2,12 @@
 
 **実験用 MVP**。長期 Goal（現状は固定の `常時 scout` placeholder）と定期起床、JSONL inbox の永続取り込み、候補の承認状態をローカルで扱うための単一 Node.js package です。
 
-現在の実装は「常時動作する自律探索」の完成版ではありません。利用者が設定できる Goal / 探索対象はなく、候補の入力は利用者が置く JSONL に限られます。LLM による新しい Research Question の発見、外部ソース監視、実作業 executor、Native Broker、Discord/Hermes 連携、Outbox 配信、systemd 常駐化は未実装です。したがって、`run` を起動しても価値ある作業を自律的に発見・完遂するわけではありません。
+Araya の control plane は「常時動作する自律探索」の完成版ではありません。利用者が設定できる Goal / 探索対象はなく、候補の入力は利用者が置く JSONL に限られます。LLM による新しい Research Question の発見、外部ソース監視、実作業 executor、Native Broker、Discord/Hermes 連携、Outbox 配信、systemd 常駐化は未実装です。したがって、`run` を起動しても価値ある作業を自律的に発見・完遂するわけではありません。引数なしの `araya` と `araya pi` は別経路で `pi` CLI を起動し、その動作・権限・副作用は Pi 側の設定に従います。
 
 ## 必要環境
 
 - Node.js 24 以上
+- `pi` CLI（引数なしの `araya` または `araya pi` を使う場合。`PATH` 上に必要）
 
 ```sh
 npm ci
@@ -23,9 +24,9 @@ npm run araya -- tick
 npm run araya -- status
 ```
 
-`init` は初期状態と `inbox/seed.jsonl` を作ります。seed が既にあれば上書きしません。`tick` は due goal を一度処理し、`status` は control plane と Pi Durable の状態を表示します。データは既定で `~/.araya` に置かれます。
+`init` は初期状態と `inbox/seed.jsonl` を作ります。seed が既にあれば上書きしません。`tick` は due goal を一度処理し、`status` は保留中の durable task を再開せずに control plane と Pi Durable の状態を表示します。データは既定で `~/.araya` に置かれます。
 
-継続起動を手動で試す場合は `npm run araya -- run` を使い、ARAYA_INTERVAL_MS ごとに tick が回り、Ctrl+C で止めます。引数なしの `araya` はヘルプ表示のみで、tick は自動では実行しません。明示的な起動（hermes からの呼び出しなど）は `araya tick` を使う想定です。ループ自身の周期と明示的な起床タイミングがずれ、二重起床を避けるためです。これは前景プロセスの loop であり、OS 起動時の自動起動・監視・再起動を設定しません。次回起床時刻は control plane DB に保存されますが、長期停止後の復旧・重複実行を含む採用条件はまだ検証完了していません。
+継続起動を手動で試す場合は `npm run araya -- run` を使い、ARAYA_INTERVAL_MS ごとに tick が回り、Ctrl+C で止めます。引数なしの `araya` は `pi` CLI を起動しますが、Araya の `tick` は自動実行しません。制御 plane を明示的に起動する場合は `araya tick`、ヘルプ表示は `araya --help` を使います。`araya pi [arguments...]` は指定した引数を Pi へ転送します。`pi` CLI は別途インストールし、`PATH` 上に置いてください。`run` は前景プロセスの loop であり、OS 起動時の自動起動・監視・再起動を設定しません。次回起床時刻は control plane DB に保存されますが、長期停止後の復旧・重複実行を含む採用条件はまだ検証完了していません。
 
 初期 seed を処理したときの状態遷移は次のとおりです。
 
@@ -49,11 +50,14 @@ npm run araya -- status
 ## CLI
 
 ```sh
-araya                                # 引数なし: ヘルプ表示（tick は自動では実行しない）
+araya                                # pi CLI を起動（tick は自動では実行しない）
+araya pi [arguments...]              # 指定した引数を pi に転送
+araya --help                         # ヘルプ表示
 npm run araya -- init
 npm run araya -- tick
 npm run araya -- status
 npm run araya -- run
+npm run araya -- pi [arguments...]
 npm run araya -- approve <opportunityId> [note...]
 npm run araya -- reject <opportunityId> [note...]
 ```
@@ -76,7 +80,7 @@ npm run araya -- reject <opportunityId> [note...]
 - `pi-durable.sqlite` が Pi Durable の Task Graph と Checkpoint を保持します。
 - 2つの SQLite DB をまたぐ単一 transaction はありません。現在の PoC では、SQLite 間の障害注入・クラッシュ復旧の条件を満たしたとは主張しません。
 - 実行 executor がない候補を `completed` と偽らず、`blocked` として残します。
-- 外部書き込み、モデル呼び出し、ネットワーク接続、通知送信は行いません。
+- Araya の制御 plane コマンドは外部書き込み、モデル呼び出し、ネットワーク接続、通知送信を行いません。引数なしの `araya` と `araya pi` は明示的に `pi` CLI を起動するため、その実行はこの制約の対象外です。
 - DB や inbox に利用者のデータを置く場合は、`ARAYA_DATA_DIR` とバックアップのアクセス権を利用者側で管理してください。
 
 ## グローバルインストール

@@ -6,12 +6,17 @@ import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
+import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context'
+import { createModels } from '@earendil-works/pi-ai/models'
+import { createRegistry, defineExtension, Harness } from '@earendil-works/pi-durable'
+
 import { loadConfig } from '../src/config.ts'
 import { parseCliArguments } from '../src/arguments.ts'
 import { openControlPlane } from '../src/control-plane.ts'
 import { approveOpportunity, initAraya, tickAraya, statusAraya } from '../src/operations.ts'
 import { readObservationSource } from '../src/observations.ts'
 import { MAIN_GOAL_ID } from '../src/runtime.ts'
+import { createArayaTasks, TASK_NAMES } from '../src/tasks.ts'
 
 async function makeConfig(): Promise<{ dir: string; config: ReturnType<typeof loadConfig> }> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'araya-test-'))
@@ -22,6 +27,100 @@ async function makeConfig(): Promise<{ dir: string; config: ReturnType<typeof lo
   })
 
   return { dir, config }
+}
+
+async function leavePendingScoutTask(config: ReturnType<typeof loadConfig>): Promise<void> {
+  await fs.mkdir(config.inboxDir, { recursive: true })
+  await fs.writeFile(
+    path.join(config.inboxDir, 'external.jsonl'),
+    `${JSON.stringify({ id: 'candidate:pending-status', title: '外部操作', risk: 'external', payload: {} })}\n`,
+    'utf8'
+  )
+
+  const controlPlane = openControlPlane(config.controlPlanePath)
+
+  try {
+    controlPlane.ensureGoal(MAIN_GOAL_ID, 'test goal', config.intervalMs, Date.now())
+    const tasks = createArayaTasks(controlPlane, config.inboxDir, MAIN_GOAL_ID, config.intervalMs)
+    const { openNodeSqliteStorage } = await import('@earendil-works/pi-durable/storage/sqlite/node')
+    const storage = await openNodeSqliteStorage(config.piDurablePath)
+    const registry = createRegistry()
+    registry.install(
+      defineExtension({
+        name: 'araya',
+        tasks: [tasks.ScoutTask, tasks.WorkTask]
+      })
+    )
+
+    const harness = await Harness.open(storage, { models: createModels(), registry }, BACKGROUND_CONTEXT)
+
+    try {
+      const root = await harness.root(BACKGROUND_CONTEXT)
+      await root.commit(
+        (tx) => tx.createTask(
+          tasks.ScoutTask,
+          { tickId: 'tick:pending-status', maxActions: config.maxActions },
+          { ownership: { kind: 'conversation' } }
+        ),
+        BACKGROUND_CONTEXT
+      )
+    } finally {
+      await harness.close(BACKGROUND_CONTEXT)
+    }
+  } finally {
+    controlPlane.close()
+  }
+}
+
+async function runPiCli(args: string[], exitCode: number) {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'araya-pi-cli-test-'))
+  const binDir = path.join(dir, 'bin')
+  const capturePath = path.join(dir, 'pi-args.json')
+  const piPath = path.join(binDir, 'pi')
+
+  await fs.mkdir(binDir)
+  await fs.writeFile(
+    piPath,
+    [
+      '#!/usr/bin/env node',
+      "const { writeFileSync } = require('node:fs')",
+      "writeFileSync(process.env.PI_CAPTURE_FILE, JSON.stringify(process.argv.slice(2)))",
+      "process.exit(Number(process.env.PI_EXIT_CODE))"
+    ].join('\n'),
+    'utf8'
+  )
+  await fs.chmod(piPath, 0o755)
+
+  try {
+    const cliPath = fileURLToPath(new URL('../bin/cli.ts', import.meta.url))
+    const child = spawn(process.execPath, [cliPath, ...args], {
+      env: {
+        ...process.env,
+        PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ''}`,
+        PI_CAPTURE_FILE: capturePath,
+        PI_EXIT_CODE: String(exitCode)
+      },
+      stdio: 'ignore'
+    })
+    const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
+      child.once('error', reject)
+      child.once('exit', (code, signal) => resolve({ code, signal }))
+    })
+    const result = await exited
+    let capturedArgs: unknown
+
+    try {
+      capturedArgs = JSON.parse(await fs.readFile(capturePath, 'utf8'))
+    } catch (error) {
+      if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) {
+        throw error
+      }
+    }
+
+    return { result, capturedArgs }
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
 }
 
 test('config: retry制御は未実装のため maxAttempts を公開しない', () => {
@@ -39,6 +138,68 @@ test('CLI arguments: -- の後ろは dash で始まる note として保持す�
     parseCliArguments(['approve', 'candidate:note', '--', '-keep-literal']),
     { help: false, positionals: ['approve', 'candidate:note', '-keep-literal'] }
   )
+})
+
+test('CLI: 引数なしは pi を起動し、終了コードを引き継ぐ', async () => {
+  const { result, capturedArgs } = await runPiCli([], 7)
+
+  assert.deepEqual(capturedArgs, [])
+  assert.equal(result.signal, null)
+  assert.equal(result.code, 7)
+})
+
+test('CLI: pi subcommand は引数を転送する', async () => {
+  const { result, capturedArgs } = await runPiCli(['pi', '--model', 'codex'], 0)
+
+  assert.deepEqual(capturedArgs, ['--model', 'codex'])
+  assert.equal(result.signal, null)
+  assert.equal(result.code, 0)
+})
+
+test('CLI: --help は pi を起動しない', async () => {
+  const { result, capturedArgs } = await runPiCli(['--help'], 0)
+
+  assert.equal(capturedArgs, undefined)
+  assert.equal(result.signal, null)
+  assert.equal(result.code, 0)
+})
+
+test('status: pending task の実行を再開せず、制御 plane を変えない', async () => {
+  const { config } = await makeConfig()
+  await leavePendingScoutTask(config)
+
+  const beforeControlPlane = openControlPlane(config.controlPlanePath)
+  const before = beforeControlPlane.summarize(config.maxActions)
+  beforeControlPlane.close()
+
+  const snapshot = await statusAraya(config)
+  const afterControlPlane = openControlPlane(config.controlPlanePath)
+  const after = afterControlPlane.summarize(config.maxActions)
+  afterControlPlane.close()
+
+  assert.deepEqual(after.opportunityCounts, before.opportunityCounts)
+  assert.deepEqual(after.pendingOutbox, before.pendingOutbox)
+  assert.deepEqual(after.events, before.events)
+  assert.ok(snapshot.activeTasks.some((task) => task.kind === TASK_NAMES.scout && task.status === 'pending'))
+})
+
+test('init: pending task の実行を再開しない', async () => {
+  const { config } = await makeConfig()
+  await leavePendingScoutTask(config)
+
+  const beforeControlPlane = openControlPlane(config.controlPlanePath)
+  const before = beforeControlPlane.summarize(config.maxActions)
+  beforeControlPlane.close()
+
+  await initAraya(config)
+
+  const afterControlPlane = openControlPlane(config.controlPlanePath)
+  const after = afterControlPlane.summarize(config.maxActions)
+  afterControlPlane.close()
+
+  assert.deepEqual(after.opportunityCounts, before.opportunityCounts)
+  assert.deepEqual(after.pendingOutbox, before.pendingOutbox)
+  assert.deepEqual(after.events, before.events)
 })
 
 test('observations: 有効な JSONL を読み、不正行を errors に分離する', async () => {

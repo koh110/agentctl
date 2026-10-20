@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { spawn } from 'node:child_process'
 import { parseCliArguments } from '../src/arguments.ts'
 import { loadConfig } from '../src/config.ts'
 import {
@@ -15,8 +16,13 @@ function printHelp(): void {
 
 使い方:
   araya
-    引数なし: このヘルプを表示するだけ。tick は自動では実行しない。
-    明示的な起動（hermes からの呼び出しなど）は araya tick を使う。
+    引数なし: pi を起動する。tick は自動では実行しない。
+
+  araya pi [arguments...]
+    pi を起動し、指定した引数をそのまま渡す。
+
+  araya --help
+    このヘルプを表示する。
 
   araya init
     状態領域と seed inbox を作成し、初期状態を status.json へ書き出す。
@@ -51,8 +57,32 @@ function printJson(value: unknown): void {
   console.log(JSON.stringify(value, null, 2))
 }
 
+async function runPi(args: string[]): Promise<void> {
+  const child = spawn('pi', args, { stdio: 'inherit', shell: false })
+
+  await new Promise<void>((resolve, reject) => {
+    child.once('error', reject)
+    child.once('exit', (code, signal) => {
+      process.exitCode = signal === null ? code ?? 1 : 1
+      resolve()
+    })
+  })
+}
+
 async function main(): Promise<void> {
-  const { help, positionals } = parseCliArguments(process.argv.slice(2))
+  const args = process.argv.slice(2)
+
+  if (args.length === 0) {
+    await runPi([])
+    return
+  }
+
+  if (args[0] === 'pi') {
+    await runPi(args.slice(1))
+    return
+  }
+
+  const { help, positionals } = parseCliArguments(args)
   const command = positionals[0] ?? 'help'
 
   if (help || command === 'help') {
