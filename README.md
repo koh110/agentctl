@@ -25,7 +25,7 @@ npm run araya -- status
 
 `init` は初期状態と `inbox/seed.jsonl` を作ります。seed が既にあれば上書きしません。`tick` は due goal を一度処理し、`status` は control plane と Pi Durable の状態を表示します。データは既定で `~/.araya` に置かれます。
 
-継続起動を手動で試す場合は `araya` を引数なしで実行する（`npm run araya -- run` でも同義）と、ARAYA_INTERVAL_MS ごとに tick が回り、Ctrl+C で止めます。引数なしの `araya` は `run` と同じです。これは前景プロセスの loop であり、OS 起動時の自動起動・監視・再起動を設定しません。次回起床時刻は control plane DB に保存されますが、長期停止後の復旧・重複実行を含む採用条件はまだ検証完了していません。
+継続起動を手動で試す場合は `npm run araya -- run` を使い、ARAYA_INTERVAL_MS ごとに tick が回り、Ctrl+C で止めます。引数なしの `araya` はヘルプ表示のみで、tick は自動では実行しません。明示的な起動（hermes からの呼び出しなど）は `araya tick` を使う想定です。ループ自身の周期と明示的な起床タイミングがずれ、二重起床を避けるためです。これは前景プロセスの loop であり、OS 起動時の自動起動・監視・再起動を設定しません。次回起床時刻は control plane DB に保存されますが、長期停止後の復旧・重複実行を含む採用条件はまだ検証完了していません。
 
 初期 seed を処理したときの状態遷移は次のとおりです。
 
@@ -49,7 +49,7 @@ npm run araya -- status
 ## CLI
 
 ```sh
-araya                                # 引数なし: 常時起動（run と同じ）
+araya                                # 引数なし: ヘルプ表示（tick は自動では実行しない）
 npm run araya -- init
 npm run araya -- tick
 npm run araya -- status

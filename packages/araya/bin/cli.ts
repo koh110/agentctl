@@ -15,8 +15,8 @@ function printHelp(): void {
 
 使い方:
   araya
-    引数なし: 常時起動。ARAYA_INTERVAL_MS ごとに tick を実行する（run と同じ）。
-    pi の scout task が起動する。Ctrl+C で停止する。
+    引数なし: このヘルプを表示するだけ。tick は自動では実行しない。
+    明示的な起動（hermes からの呼び出しなど）は araya tick を使う。
 
   araya init
     状態領域と seed inbox を作成し、初期状態を status.json へ書き出す。
@@ -53,7 +53,7 @@ function printJson(value: unknown): void {
 
 async function main(): Promise<void> {
   const { help, positionals } = parseCliArguments(process.argv.slice(2))
-  const command = positionals[0] ?? 'run'
+  const command = positionals[0] ?? 'help'
 
   if (help || command === 'help') {
     printHelp()
