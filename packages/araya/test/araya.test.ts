@@ -12,6 +12,7 @@ import { createRegistry, defineExtension, Harness } from '@earendil-works/pi-dur
 
 import { loadConfig } from '../src/config.ts'
 import { parseCliArguments } from '../src/arguments.ts'
+import { runCli } from '../src/cli.ts'
 import { openControlPlane } from '../src/control-plane.ts'
 import { approveOpportunity, initAraya, tickAraya, statusAraya } from '../src/operations.ts'
 import { readObservationSource } from '../src/observations.ts'
@@ -72,52 +73,26 @@ async function leavePendingScoutTask(config: ReturnType<typeof loadConfig>): Pro
   }
 }
 
-async function runPiCli(args: string[], exitCode: number) {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'araya-pi-cli-test-'))
-  const binDir = path.join(dir, 'bin')
-  const capturePath = path.join(dir, 'pi-args.json')
-  const piPath = path.join(binDir, 'pi')
-
-  await fs.mkdir(binDir)
-  await fs.writeFile(
-    piPath,
-    [
-      '#!/usr/bin/env node',
-      "const { writeFileSync } = require('node:fs')",
-      "writeFileSync(process.env.PI_CAPTURE_FILE, JSON.stringify(process.argv.slice(2)))",
-      "process.exit(Number(process.env.PI_EXIT_CODE))"
-    ].join('\n'),
-    'utf8'
-  )
-  await fs.chmod(piPath, 0o755)
+async function runArayaCliWithoutPiBinary(args: string[]) {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'araya-no-pi-cli-test-'))
+  const cliPath = fileURLToPath(new URL('../bin/cli.ts', import.meta.url))
+  const child = spawn(process.execPath, [cliPath, ...args], {
+    env: { ...process.env, HOME: dir, PATH: dir },
+    stdio: 'pipe'
+  })
+  const stdout: string[] = []
+  const stderr: string[] = []
+  child.stdout.setEncoding('utf8').on('data', (chunk: string) => stdout.push(chunk))
+  child.stderr.setEncoding('utf8').on('data', (chunk: string) => stderr.push(chunk))
 
   try {
-    const cliPath = fileURLToPath(new URL('../bin/cli.ts', import.meta.url))
-    const child = spawn(process.execPath, [cliPath, ...args], {
-      env: {
-        ...process.env,
-        PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ''}`,
-        PI_CAPTURE_FILE: capturePath,
-        PI_EXIT_CODE: String(exitCode)
-      },
-      stdio: 'ignore'
-    })
-    const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
+    const result = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
       child.once('error', reject)
       child.once('exit', (code, signal) => resolve({ code, signal }))
+      child.stdin.end()
     })
-    const result = await exited
-    let capturedArgs: unknown
 
-    try {
-      capturedArgs = JSON.parse(await fs.readFile(capturePath, 'utf8'))
-    } catch (error) {
-      if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) {
-        throw error
-      }
-    }
-
-    return { result, capturedArgs }
+    return { result, stdout: stdout.join(''), stderr: stderr.join('') }
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
   }
@@ -140,28 +115,43 @@ test('CLI arguments: -- の後ろは dash で始まる note として保持す�
   )
 })
 
-test('CLI: 引数なしは pi を起動し、終了コードを引き継ぐ', async () => {
-  const { result, capturedArgs } = await runPiCli([], 7)
+test('CLI: 引数なしは Pi SDK を空引数で呼び出す', async () => {
+  let capturedArgs: string[] | undefined
+
+  await runCli([], async (args) => {
+    capturedArgs = args
+  })
 
   assert.deepEqual(capturedArgs, [])
-  assert.equal(result.signal, null)
-  assert.equal(result.code, 7)
 })
 
-test('CLI: pi subcommand は引数を転送する', async () => {
-  const { result, capturedArgs } = await runPiCli(['pi', '--model', 'codex'], 0)
+test('CLI: pi subcommand は Pi SDK に引数を転送する', async () => {
+  let capturedArgs: string[] | undefined
+
+  await runCli(['pi', '--model', 'codex'], async (args) => {
+    capturedArgs = args
+  })
 
   assert.deepEqual(capturedArgs, ['--model', 'codex'])
-  assert.equal(result.signal, null)
-  assert.equal(result.code, 0)
 })
 
-test('CLI: --help は pi を起動しない', async () => {
-  const { result, capturedArgs } = await runPiCli(['--help'], 0)
+test('CLI: --help は Pi SDK を起動しない', async () => {
+  let piStarted = false
 
-  assert.equal(capturedArgs, undefined)
+  await runCli(['--help'], async () => {
+    piStarted = true
+  })
+
+  assert.equal(piStarted, false)
+})
+
+test('CLI: Pi SDK はグローバル pi コマンドなしで使える', async () => {
+  const { result, stdout, stderr } = await runArayaCliWithoutPiBinary(['pi', '--version'])
+
   assert.equal(result.signal, null)
   assert.equal(result.code, 0)
+  assert.match(stdout.trim(), /^\d+\.\d+\.\d+$/)
+  assert.equal(stderr, '')
 })
 
 test('status: pending task の実行を再開せず、制御 plane を変えない', async () => {

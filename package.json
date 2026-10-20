@@ -18,6 +18,16 @@
     "test": "node --test packages/araya/test",
     "typecheck": "tsc -p tsconfig.json"
   },
+  "overrides": {
+    "@earendil-works/pi-coding-agent": {
+      "@earendil-works/chord": "1.1.0",
+      "@earendil-works/pi-agent-core": "1.1.0",
+      "@earendil-works/pi-ai": "1.1.0",
+      "@earendil-works/pi-codemode": "1.1.0",
+      "@earendil-works/pi-mcp": "1.1.0",
+      "@earendil-works/pi-tui": "1.1.0"
+    }
+  },
   "devDependencies": {
     "@types/node": "^24.7.0",
     "typescript": "^5.9.3"
