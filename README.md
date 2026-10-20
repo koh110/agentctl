@@ -73,6 +73,7 @@ npm run araya -- reject <opportunityId> [note...]
 - `ARAYA_PI_DURABLE_PATH` — Pi Durable task graph DB
 - `ARAYA_INTERVAL_MS` — 次回起床間隔（既定: 900000 ms）
 - `ARAYA_MAX_ACTIONS` — 1 tick あたりの処理候補数上限（既定: 3）
+- `PI_CODING_AGENT_DIR` — Pi の agent directory。Pi と Araya の両方で同じ値を使うと、`tick` / `run` のモデルruntimeが同じ `auth.json` と `models.json` を参照します。未指定時はPiの既定directoryを使用します。
 
 ## 状態と安全境界
 
@@ -80,7 +81,7 @@ npm run araya -- reject <opportunityId> [note...]
 - `pi-durable.sqlite` が Pi Durable の Task Graph と Checkpoint を保持します。
 - 2つの SQLite DB をまたぐ単一 transaction はありません。現在の PoC では、SQLite 間の障害注入・クラッシュ復旧の条件を満たしたとは主張しません。
 - 実行 executor がない候補を `completed` と偽らず、`blocked` として残します。
-- Araya の制御 plane コマンドは外部書き込み、モデル呼び出し、ネットワーク接続、通知送信を行いません。引数なしの `araya` と `araya pi` は明示的に Pi coding-agent SDK の CLI entry point を実行するため、その実行はこの制約の対象外です。
+- Araya の制御 plane コマンド自体は、外部書き込み、モデル呼び出し、ネットワーク接続、通知送信を行いません。`tick` / `run` の durable Harness は Pi の `ModelRuntime` を使い、別プロセスでも Pi の `/login` で保存した認証情報をモデルリクエスト時に解決できます（既定の agent directory を共有します。変更する場合は `PI_CODING_AGENT_DIR` を Pi と Araya の両方に設定してください）。認証情報は Araya の設定やDBへ複製しません。現状の scout/work task はまだモデルを呼び出さないため、tick自体がLLM処理を行うものではありません。引数なしの `araya` と `araya pi` は明示的に Pi coding-agent SDK の CLI entry point を実行するため、その実行はこの制約の対象外です。
 - DB や inbox に利用者のデータを置く場合は、`ARAYA_DATA_DIR` とバックアップのアクセス権を利用者側で管理してください。
 
 ## グローバルインストール

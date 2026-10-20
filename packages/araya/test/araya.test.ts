@@ -16,7 +16,7 @@ import { runCli } from '../src/cli.ts'
 import { openControlPlane } from '../src/control-plane.ts'
 import { approveOpportunity, initAraya, tickAraya, statusAraya } from '../src/operations.ts'
 import { readObservationSource } from '../src/observations.ts'
-import { MAIN_GOAL_ID } from '../src/runtime.ts'
+import { createArayaModelRuntime, MAIN_GOAL_ID } from '../src/runtime.ts'
 import { createArayaTasks, TASK_NAMES } from '../src/tasks.ts'
 
 async function makeConfig(): Promise<{ dir: string; config: ReturnType<typeof loadConfig> }> {
@@ -24,7 +24,8 @@ async function makeConfig(): Promise<{ dir: string; config: ReturnType<typeof lo
   const config = loadConfig({
     ARAYA_DATA_DIR: dir,
     ARAYA_INTERVAL_MS: '1000',
-    ARAYA_MAX_ACTIONS: '10'
+    ARAYA_MAX_ACTIONS: '10',
+    PI_CODING_AGENT_DIR: path.join(dir, 'pi-agent')
   })
 
   return { dir, config }
@@ -97,6 +98,31 @@ async function runArayaCliWithoutPiBinary(args: string[]) {
     await fs.rm(dir, { recursive: true, force: true })
   }
 }
+
+test('runtime: Pi auth.json credentials are available to durable model calls', async () => {
+  const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), 'araya-pi-auth-test-'))
+  await fs.writeFile(
+    path.join(agentDir, 'auth.json'),
+    JSON.stringify({ openai: { type: 'api_key', key: 'test-only-not-a-real-credential' } }),
+    'utf8'
+  )
+
+  try {
+    const models = await createArayaModelRuntime(agentDir)
+    const auth = await models.getAuth('openai')
+
+    assert.equal(auth?.auth.apiKey, 'test-only-not-a-real-credential')
+  } finally {
+    await fs.rm(agentDir, { recursive: true, force: true })
+  }
+})
+
+test('config: Pi agent directory is taken from the shared environment variable', () => {
+  const agentDir = path.join(os.tmpdir(), 'araya-shared-pi-agent')
+  const config = loadConfig({ PI_CODING_AGENT_DIR: agentDir })
+
+  assert.equal(config.piAgentDir, agentDir)
+})
 
 test('config: retry制御は未実装のため maxAttempts を公開しない', () => {
   const config = loadConfig({ ARAYA_MAX_ATTEMPTS: '7' })
@@ -519,7 +545,9 @@ test('run: SIGINT と SIGTERM で長い interval 待機を中断して速やか�
         ARAYA_CONTROL_PLANE_PATH: config.controlPlanePath,
         ARAYA_PI_DURABLE_PATH: config.piDurablePath,
         ARAYA_INTERVAL_MS: '60000',
-        ARAYA_MAX_ACTIONS: '10'
+        ARAYA_MAX_ACTIONS: '10',
+        PI_CODING_AGENT_DIR: config.piAgentDir,
+        PI_OFFLINE: '1'
       },
       stdio: 'ignore'
     })

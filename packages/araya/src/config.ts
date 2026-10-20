@@ -22,6 +22,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
 
   return {
     dataDir,
+    piAgentDir: env.PI_CODING_AGENT_DIR || undefined,
     inboxDir: path.resolve(env.ARAYA_INBOX_DIR ?? path.join(dataDir, 'inbox')),
     statusFile: path.resolve(env.ARAYA_STATUS_FILE ?? path.join(dataDir, 'status.json')),
     controlPlanePath: path.resolve(env.ARAYA_CONTROL_PLANE_PATH ?? path.join(dataDir, 'araya.sqlite')),

@@ -29,12 +29,25 @@ async function ensureParentDir(filePath: string): Promise<void> {
   await fs.mkdir(path.dirname(filePath), { recursive: true })
 }
 
+export async function createArayaModelRuntime(agentDir?: string) {
+  const { ModelRuntime } = await import('@earendil-works/pi-coding-agent')
+  const options = agentDir === undefined
+    ? {}
+    : {
+        authPath: path.join(agentDir, 'auth.json'),
+        modelsPath: path.join(agentDir, 'models.json')
+      }
+
+  return ModelRuntime.create({ refreshOnCreate: false, ...options })
+}
+
 export async function openArayaRuntime(
   config: {
     controlPlanePath: string
     inboxDir: string
     piDurablePath: string
     intervalMs: number
+    piAgentDir?: string
   },
   options: { resumeTasks?: boolean } = {}
 ): Promise<ArayaRuntime> {
@@ -60,10 +73,11 @@ export async function openArayaRuntime(
     })
   )
 
+  const models = options.resumeTasks === false ? createModels() : await createArayaModelRuntime(config.piAgentDir)
   const harness = await Harness.open(
     storage,
     {
-      models: createModels(),
+      models,
       registry,
       onReport: (error: unknown) => {
         console.error('[pi-durable report]', error)

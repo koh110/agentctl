@@ -220,8 +220,8 @@ export async function runAraya(config: ArayaConfig): Promise<void> {
     resumeAfterWait?.()
   }
 
-  process.once('SIGINT', stop)
-  process.once('SIGTERM', stop)
+  process.on('SIGINT', stop)
+  process.on('SIGTERM', stop)
 
   try {
     while (!stopped) {
