@@ -1,6 +1,10 @@
 {
   "private": true,
   "type": "module",
+  "name": "araya",
+  "bin": {
+    "araya": "./packages/araya/dist/bin/cli.js"
+  },
   "workspaces": [
     "packages/araya"
   ],
@@ -9,12 +13,13 @@
   },
   "scripts": {
     "araya": "node packages/araya/bin/cli.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "deploy": "PREFIX=\"${ARAYA_INSTALL_PREFIX:-${HOME:?set HOME or ARAYA_INSTALL_PREFIX}/.local}\" && npm run build && npm uninstall --global --prefix \"$PREFIX\" --no-audit --no-fund agentctl && npm install --global --prefix \"$PREFIX\" --no-audit --no-fund .",
     "test": "node --test packages/araya/test",
     "typecheck": "tsc -p tsconfig.json"
   },
   "devDependencies": {
     "@types/node": "^24.7.0",
     "typescript": "^5.9.3"
-  },
-  "name": "araya"
+  }
 }

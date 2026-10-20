@@ -79,6 +79,21 @@ npm run araya -- reject <opportunityId> [note...]
 - 外部書き込み、モデル呼び出し、ネットワーク接続、通知送信は行いません。
 - DB や inbox に利用者のデータを置く場合は、`ARAYA_DATA_DIR` とバックアップのアクセス権を利用者側で管理してください。
 
+## グローバルインストール
+
+リポジトリのローカルcheckoutをユーザーglobal prefix（既定: `$HOME/.local`）へシンボリックリンクし、`araya` コマンドを登録するには、ルートで実行します。TypeScriptをJavaScriptへbuildしてからinstallします。指定prefix内に旧 `agentctl` package があれば先にuninstallし、`araya` のbin競合を解消してから置き換えます。npm registryへのpublishは行わず、local linkなので `version` は不要です。link先のcheckoutと `node_modules` を移動・削除しないでください。
+
+```sh
+npm run deploy
+araya --help
+```
+
+別のprefixを使う場合は `ARAYA_INSTALL_PREFIX` で上書きできます。prefixの `bin` directoryが `PATH` に含まれていることを確認してください。
+
+```sh
+ARAYA_INSTALL_PREFIX="$HOME/.npm-global" npm run deploy
+```
+
 ## 開発
 
 ```sh
