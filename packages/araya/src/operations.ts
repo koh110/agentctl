@@ -213,24 +213,42 @@ export async function tickAraya(config: ArayaConfig): Promise<TickResult> {
 
 export async function runAraya(config: ArayaConfig): Promise<void> {
   let stopped = false
+  let resumeAfterWait: (() => void) | undefined
 
   const stop = () => {
     stopped = true
+    resumeAfterWait?.()
   }
 
   process.once('SIGINT', stop)
   process.once('SIGTERM', stop)
 
-  while (!stopped) {
-    const result = await tickAraya(config)
-    const snapshot = await collectStatus(config, Date.now())
-    await writeStatusFile(config, { ...snapshot, tick: result })
+  try {
+    while (!stopped) {
+      const result = await tickAraya(config)
+      const snapshot = await collectStatus(config, Date.now())
+      await writeStatusFile(config, { ...snapshot, tick: result })
 
-    if (stopped) {
-      break
+      if (stopped) {
+        break
+      }
+
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(() => {
+          resumeAfterWait = undefined
+          resolve()
+        }, Math.max(1000, config.intervalMs))
+
+        resumeAfterWait = () => {
+          clearTimeout(timer)
+          resumeAfterWait = undefined
+          resolve()
+        }
+      })
     }
-
-    await new Promise<void>((resolve) => setTimeout(resolve, Math.max(1000, config.intervalMs)))
+  } finally {
+    process.off('SIGINT', stop)
+    process.off('SIGTERM', stop)
   }
 }
 

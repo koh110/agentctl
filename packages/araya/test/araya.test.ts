@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 
 import { loadConfig } from '../src/config.ts'
 import { parseCliArguments } from '../src/arguments.ts'
@@ -349,4 +351,76 @@ test('tick: outbox は通知が実配信されるまで pending のまま保持�
     })),
     [{ id: 'approval-request:candidate:outbox', topic: 'discord.approval', status: 'pending' }]
   )
+})
+
+test('run: SIGINT と SIGTERM で長い interval 待機を中断して速やかに終了する', async () => {
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+    const { config } = await makeConfig()
+    await fs.mkdir(config.inboxDir, { recursive: true })
+
+    const cliPath = fileURLToPath(new URL('../bin/cli.ts', import.meta.url))
+    const child = spawn(process.execPath, [cliPath, 'run'], {
+      env: {
+        ...process.env,
+        ARAYA_DATA_DIR: config.dataDir,
+        ARAYA_INBOX_DIR: config.inboxDir,
+        ARAYA_STATUS_FILE: config.statusFile,
+        ARAYA_CONTROL_PLANE_PATH: config.controlPlanePath,
+        ARAYA_PI_DURABLE_PATH: config.piDurablePath,
+        ARAYA_INTERVAL_MS: '60000',
+        ARAYA_MAX_ACTIONS: '10'
+      },
+      stdio: 'ignore'
+    })
+    const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
+      child.once('error', reject)
+      child.once('exit', (code, signal) => resolve({ code, signal }))
+    })
+
+    try {
+      const readyDeadline = Date.now() + 5000
+      let ready = false
+
+      while (!ready && Date.now() < readyDeadline) {
+        try {
+          const snapshot: unknown = JSON.parse(await fs.readFile(config.statusFile, 'utf8'))
+
+          if (snapshot !== null && typeof snapshot === 'object' && 'tick' in snapshot) {
+            const tick = snapshot.tick
+            ready = tick !== null && typeof tick === 'object' && 'status' in tick && tick.status === 'due'
+          }
+        } catch (error) {
+          if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) {
+            throw error
+          }
+        }
+
+        if (!ready) {
+          await new Promise((resolve) => setTimeout(resolve, 25))
+        }
+      }
+
+      assert.equal(ready, true, 'run が最初の tick を status file に書くこと')
+      assert.equal(child.kill(signal), true, `${signal} を子プロセスへ送信すること`)
+
+      let timeoutHandle: NodeJS.Timeout | undefined
+      const timedOut = new Promise<undefined>((resolve) => {
+        timeoutHandle = setTimeout(() => resolve(undefined), 1500)
+      })
+      const exitResult = await Promise.race([exited, timedOut])
+
+      if (timeoutHandle !== undefined) {
+        clearTimeout(timeoutHandle)
+      }
+
+      assert.ok(exitResult, `${signal} 後、次回 tick interval を待たずに終了すること`)
+      assert.equal(exitResult.code, 0)
+      assert.equal(exitResult.signal, null)
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill('SIGKILL')
+        await exited
+      }
+    }
+  }
 })
