@@ -336,27 +336,109 @@ test('development executor rejects a symlinked worktree parent before creating a
   }
 })
 
-test('development executor refuses a worktree directory that other users can read', async () => {
+function createCompletingExecutor(projectDir: string, worktreeDir: string, agentCalls: string[]) {
+  return createDevelopmentExecutor({ projectDir, worktreeDir }, {
+    runAgent: async ({ cwd, task }) => {
+      agentCalls.push(task)
+      await fs.writeFile(path.join(cwd, 'README.md'), '# fixture revised\n', 'utf8')
+
+      return { summary: 'Revised the fixture.' }
+    },
+    runVerification: async ({ command }) => {
+      return {
+        command: [...command],
+        exitCode: 0,
+        stdout: '',
+        stderr: ''
+      }
+    }
+  })
+}
+
+// umask 002の環境では、araya initが作るdata directoryが775になる。group書き込みは許可する。
+test('development executor accepts a group-writable parent of the worktree directory', async () => {
+  const root = await makeTempDir()
+  const projectDir = await createGitRepository(root)
+  const dataDir = path.join(root, 'data')
+  const worktreeDir = path.join(dataDir, 'worktrees')
+  const { controlPlane, opportunity } = createDevelopmentOpportunity(path.join(root, 'control-plane.sqlite'))
+  const agentCalls: string[] = []
+  await fs.mkdir(dataDir, { mode: 0o775 })
+  await fs.chmod(dataDir, 0o775)
+
+  try {
+    const result = await createCompletingExecutor(projectDir, worktreeDir, agentCalls)(opportunity)
+
+    assert.equal(result.evidence.error, undefined)
+    assert.equal(result.status, 'completed')
+    assert.deepEqual(agentCalls, ['Create src/feature.ts'])
+    assert.equal(path.dirname(String(result.evidence.worktreePath)), await fs.realpath(worktreeDir))
+  } finally {
+    controlPlane.close()
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test('development executor refuses a world-writable parent of the worktree directory', async () => {
+  const root = await makeTempDir()
+  const projectDir = await createGitRepository(root)
+  const dataDir = path.join(root, 'data')
+  const worktreeDir = path.join(dataDir, 'worktrees')
+  const { controlPlane, opportunity } = createDevelopmentOpportunity(path.join(root, 'control-plane.sqlite'))
+  const agentCalls: string[] = []
+  await fs.mkdir(dataDir, { mode: 0o777 })
+  await fs.chmod(dataDir, 0o777)
+
+  try {
+    const result = await createCompletingExecutor(projectDir, worktreeDir, agentCalls)(opportunity)
+
+    assert.equal(result.status, 'failed')
+    assert.equal(result.evidence.error, 'worktree_root_parent_permissions_unsafe')
+    assert.deepEqual(agentCalls, [])
+    await assert.rejects(fs.lstat(worktreeDir), { code: 'ENOENT' })
+  } finally {
+    controlPlane.close()
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test('development executor accepts a worktree directory that group members can write', async () => {
   const root = await makeTempDir()
   const projectDir = await createGitRepository(root)
   const worktreeDir = path.join(root, 'shared-worktrees')
   const { controlPlane, opportunity } = createDevelopmentOpportunity(path.join(root, 'control-plane.sqlite'))
-  let agentCalled = false
-  await fs.mkdir(worktreeDir, { mode: 0o755 })
-  await fs.chmod(worktreeDir, 0o755)
+  const agentCalls: string[] = []
+  await fs.mkdir(worktreeDir, { mode: 0o775 })
+  await fs.chmod(worktreeDir, 0o775)
 
   try {
-    const execute = createDevelopmentExecutor({ projectDir, worktreeDir }, {
-      runAgent: async () => {
-        agentCalled = true
-        return { summary: 'unexpected' }
-      }
-    })
-    const result = await execute(opportunity)
+    const result = await createCompletingExecutor(projectDir, worktreeDir, agentCalls)(opportunity)
+
+    assert.equal(result.evidence.error, undefined)
+    assert.equal(result.status, 'completed')
+    assert.deepEqual(agentCalls, ['Create src/feature.ts'])
+    assert.equal(path.dirname(String(result.evidence.worktreePath)), await fs.realpath(worktreeDir))
+  } finally {
+    controlPlane.close()
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test('development executor refuses a world-writable worktree directory', async () => {
+  const root = await makeTempDir()
+  const projectDir = await createGitRepository(root)
+  const worktreeDir = path.join(root, 'shared-worktrees')
+  const { controlPlane, opportunity } = createDevelopmentOpportunity(path.join(root, 'control-plane.sqlite'))
+  const agentCalls: string[] = []
+  await fs.mkdir(worktreeDir, { mode: 0o777 })
+  await fs.chmod(worktreeDir, 0o777)
+
+  try {
+    const result = await createCompletingExecutor(projectDir, worktreeDir, agentCalls)(opportunity)
 
     assert.equal(result.status, 'failed')
     assert.equal(result.evidence.error, 'worktree_root_permissions_unsafe')
-    assert.equal(agentCalled, false)
+    assert.deepEqual(agentCalls, [])
     assert.equal((await fs.readdir(worktreeDir)).length, 0)
   } finally {
     controlPlane.close()

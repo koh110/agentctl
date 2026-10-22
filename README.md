@@ -81,7 +81,7 @@ npm run araya -- reject <opportunityId> [note...]
 - `ARAYA_INTERVAL_MS` — 次回起床間隔（既定: 900000 ms）
 - `ARAYA_MAX_ACTIONS` — 1 tick あたりの処理候補数上限（既定: 3）
 - `ARAYA_PROJECT_DIR` — 開発対象Git repository root（既定: Araya起動時のcurrent directory）。tracked/untracked変更があると開発課題は開始しません。
-- `ARAYA_WORKTREE_DIR` — 課題別worktreeの保存先（既定: `<dataDir>/worktrees`）。対象repositoryと重ならない、利用者所有の非共有書込可能directoryを指定してください。
+- `ARAYA_WORKTREE_DIR` — 課題別worktreeの保存先（既定: `<dataDir>/worktrees`）。対象repositoryと重ならない、利用者所有のdirectoryを指定してください。group書き込みは許可しますが、全ユーザーが書き込めるdirectoryは拒否します。
 - `ARAYA_DEVELOPMENT_TIMEOUT_MS` — Pi実装taskのtimeout（既定: 1200000 ms、範囲: 1000〜3600000 ms）
 - `ARAYA_VERIFICATION_TIMEOUT_MS` — 検証commandのtimeout（既定: 300000 ms、範囲: 1000〜3600000 ms）
 - `PI_CODING_AGENT_DIR` — Pi の agent directory。Pi と Araya の両方で同じ値を使うと、`tick` / `run` のモデルruntimeが同じ `auth.json` と `models.json` を参照します。未指定時はPiの既定directoryを使用します。

@@ -27,7 +27,7 @@ Araya の利用者がJSONL inboxに具体的な開発課題を書くことが実
 - Pi 1.4 SDKのAgentSessionをnon-interactiveに使い、tool allowlistはAraya管理のworkspace限定read/list/search/edit/write toolsのみ。bash/PowerShell、MCP、外部extensionを有効にしない。sessionはin-memoryとし、会話履歴をPiの通常session directoryへ保存しない。Pi agent directoryはread-onlyでmountし、モデル通信に必要なnetworkだけworkerの実行環境で共有する。
 - file toolsはroot外の絶対path、`..`、root外へ向かうsymlink、hardlinkを拒否する。`.git` metadataと`node_modules`はmodelから不可視にする。
 - verify commandはbubblewrap内でshellなしargvとして実行する。home/credential directoryとGit metadataはnamespaceに含めず、networkをunshareする。worktreeは一時overlayから参照し、verification中のworkspace書き込みは終了時に破棄する。一時tmpfsもwrite可能、system runtimeと既存依存はread-onlyとする。system configは最小限の必要ファイルだけをmountし、host secret fileは含めない。
-- worktree rootはowner専用modeを要求し、symlinkを含むpathとgroup/world-writable非sticky parentを拒否する。
+- worktree rootは利用者の所有を要求し、symlinkを含むpath、全ユーザーが書き込めるworktree root、全ユーザーが書き込めてstickyでない親directoryを拒否する。umask 002の既定mode（775）でも動くよう、group書き込みは許可する。
 - task単位のtimeoutとstdout/stderr上限を設ける。timeout/失敗時はtaskをfailedにし、既存worktreeを削除せず証拠として残す。自動retryはしない。
 - 各tickのworkspace taskは最大1件。複数taskを並列実行しない。
 

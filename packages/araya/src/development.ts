@@ -544,7 +544,8 @@ async function validateWorktreePathAncestors(targetPath: string) {
       throw new Error('worktree_root_parent_must_be_directory')
     }
 
-    if (index < components.length - 1 && (stat.mode & 0o022) !== 0 && (stat.mode & 0o1000) === 0) {
+    // group書き込みは許可する。全ユーザーが書き込めてstickyでもない親だけを拒否する。
+    if (index < components.length - 1 && (stat.mode & 0o002) !== 0 && (stat.mode & 0o1000) === 0) {
       throw new Error('worktree_root_parent_permissions_unsafe')
     }
   }
@@ -572,7 +573,8 @@ async function prepareWorktreeRoot(worktreeDir: string, projectRealPath: string)
     throw new Error('worktree_root_overlaps_project')
   }
 
-  if ((stat.mode & 0o077) !== 0 || (typeof process.getuid === 'function' && stat.uid !== process.getuid())) {
+  // group書き込みは許可する。全ユーザーが書き込めるdirectoryと、利用者以外が所有するdirectoryは拒否する。
+  if ((stat.mode & 0o002) !== 0 || (typeof process.getuid === 'function' && stat.uid !== process.getuid())) {
     throw new Error('worktree_root_permissions_unsafe')
   }
 
