@@ -86,7 +86,7 @@ npm run araya -- reject <opportunityId> [note...]
 
 ## グローバルインストール
 
-リポジトリのローカルcheckoutをユーザーglobal prefix（既定: `$HOME/.local`）へシンボリックリンクし、`araya` コマンドを登録するには、ルートで実行します。TypeScriptをJavaScriptへbuildしてからinstallします。指定prefix内に旧 `agentctl` package があれば先にuninstallし、`araya` のbin競合を解消してから置き換えます。npm registryへのpublishは行わず、local linkなので `version` は不要です。link先のcheckoutと `node_modules` を移動・削除しないでください。
+ルートで `npm run deploy` を実行すると、`araya`（version `0.0.1`）をbuildし、一時tarballからユーザーglobal prefix（既定: `$HOME/.local`）へinstallします。checkoutへのsymlinkではないため、以後のソース変更は再deployまで反映されず、worktreeを移動・削除してもinstall済みコマンドは影響を受けません。npm registryへのpublishは行いません。指定prefix内に旧 `agentctl` package があれば先にuninstallし、`araya` のbin競合を解消してから置き換えます。
 
 ```sh
 npm run deploy

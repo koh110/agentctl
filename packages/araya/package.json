@@ -1,5 +1,7 @@
 {
   "private": true,
+  "name": "araya-cli",
+  "version": "0.0.1",
   "type": "module",
   "bin": {
     "araya": "./bin/cli.ts"
@@ -8,9 +10,9 @@
     "node": ">=24.0.0"
   },
   "dependencies": {
-    "@earendil-works/chord": "1.1.0",
-    "@earendil-works/pi-ai": "1.1.0",
-    "@earendil-works/pi-coding-agent": "1.1.0",
-    "@earendil-works/pi-durable": "1.1.0"
+    "@earendil-works/chord": "^1.2.0",
+    "@earendil-works/pi-ai": "^1.2.0",
+    "@earendil-works/pi-coding-agent": "^1.2.0",
+    "@earendil-works/pi-durable": "^1.2.0"
   }
 }
