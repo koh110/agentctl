@@ -26,4 +26,5 @@ if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
 fi
 
 npm uninstall --global --prefix "$PREFIX" --no-audit --no-fund agentctl
-npm install --global --prefix "$PREFIX" --no-audit --no-fund "$1"
+# 同名・同versionの既存symlinkをnpmがup-to-date扱いしないよう強制置換する。
+npm install --global --prefix "$PREFIX" --no-audit --no-fund --force "$1"
