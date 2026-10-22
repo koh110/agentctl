@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite'
 
-export type Risk = 'read-only' | 'external'
+export type Risk = 'read-only' | 'workspace' | 'external'
 
 export type OpportunityStatus =
   | 'discovered'
@@ -25,6 +25,7 @@ export type Opportunity = {
   observationId: string
   goalId?: string
   title: string
+  kind: string
   risk: Risk
   status: OpportunityStatus
   payload: Record<string, unknown>
@@ -134,7 +135,7 @@ function asNullableJsonObject(value: unknown): Record<string, unknown> | undefin
 function asRisk(value: unknown): Risk {
   const text = asText(value)
 
-  if (text === 'read-only' || text === 'external') {
+  if (text === 'read-only' || text === 'workspace' || text === 'external') {
     return text
   }
 
@@ -184,6 +185,85 @@ function transaction<T>(db: DatabaseSync, fn: () => T): T {
   }
 }
 
+function migrateWorkspaceRiskSchema(db: DatabaseSync) {
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'observations'").get()
+  const schemaSql = row?.sql
+
+  if (typeof schemaSql !== 'string' || schemaSql.includes("'workspace'")) {
+    return
+  }
+
+  db.exec('PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE;')
+
+  try {
+    db.exec(`
+      CREATE TABLE observations_araya_new (
+        id TEXT PRIMARY KEY,
+        source TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        title TEXT NOT NULL,
+        risk TEXT NOT NULL CHECK (risk IN ('read-only', 'workspace', 'external')),
+        payload_json TEXT NOT NULL,
+        seen_at INTEGER NOT NULL
+      );
+      INSERT INTO observations_araya_new SELECT id, source, kind, title, risk, payload_json, seen_at FROM observations;
+
+      CREATE TABLE opportunities_araya_new (
+        id TEXT PRIMARY KEY,
+        observation_id TEXT NOT NULL,
+        goal_id TEXT,
+        title TEXT NOT NULL,
+        risk TEXT NOT NULL CHECK (risk IN ('read-only', 'workspace', 'external')),
+        status TEXT NOT NULL CHECK (
+          status IN ('discovered', 'scouting', 'approval_requested', 'approved', 'completed', 'blocked', 'failed', 'rejected')
+        ),
+        payload_json TEXT NOT NULL,
+        evidence_json TEXT,
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        discovered_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        FOREIGN KEY (observation_id) REFERENCES observations_araya_new(id),
+        FOREIGN KEY (goal_id) REFERENCES goals(id)
+      );
+      INSERT INTO opportunities_araya_new
+        SELECT id, observation_id, goal_id, title, risk, status, payload_json, evidence_json,
+               attempt_count, discovered_at, updated_at
+        FROM opportunities;
+
+      CREATE TABLE decisions_araya_new (
+        id TEXT PRIMARY KEY,
+        opportunity_id TEXT NOT NULL,
+        decision TEXT NOT NULL CHECK (decision IN ('approved', 'rejected')),
+        actor TEXT NOT NULL,
+        note TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        FOREIGN KEY (opportunity_id) REFERENCES opportunities_araya_new(id)
+      );
+      INSERT INTO decisions_araya_new SELECT id, opportunity_id, decision, actor, note, created_at FROM decisions;
+
+      DROP TABLE decisions;
+      DROP TABLE opportunities;
+      DROP TABLE observations;
+      ALTER TABLE observations_araya_new RENAME TO observations;
+      ALTER TABLE opportunities_araya_new RENAME TO opportunities;
+      ALTER TABLE decisions_araya_new RENAME TO decisions;
+    `)
+
+    const violations = db.prepare('PRAGMA foreign_key_check').all()
+
+    if (violations.length > 0) {
+      throw new Error(`workspace-risk migration found ${violations.length} foreign-key violation(s)`)
+    }
+
+    db.exec('COMMIT;')
+  } catch (error) {
+    db.exec('ROLLBACK;')
+    throw error
+  } finally {
+    db.exec('PRAGMA foreign_keys = ON;')
+  }
+}
+
 function ensureSchema(db: DatabaseSync) {
   db.exec(`
     PRAGMA journal_mode = WAL;
@@ -204,7 +284,7 @@ function ensureSchema(db: DatabaseSync) {
       source TEXT NOT NULL,
       kind TEXT NOT NULL,
       title TEXT NOT NULL,
-      risk TEXT NOT NULL CHECK (risk IN ('read-only', 'external')),
+      risk TEXT NOT NULL CHECK (risk IN ('read-only', 'workspace', 'external')),
       payload_json TEXT NOT NULL,
       seen_at INTEGER NOT NULL
     );
@@ -214,7 +294,7 @@ function ensureSchema(db: DatabaseSync) {
       observation_id TEXT NOT NULL,
       goal_id TEXT,
       title TEXT NOT NULL,
-      risk TEXT NOT NULL CHECK (risk IN ('read-only', 'external')),
+      risk TEXT NOT NULL CHECK (risk IN ('read-only', 'workspace', 'external')),
       status TEXT NOT NULL CHECK (
         status IN ('discovered', 'scouting', 'approval_requested', 'approved', 'completed', 'blocked', 'failed', 'rejected')
       ),
@@ -290,6 +370,7 @@ function mapOpportunity(row: Record<string, unknown>): Opportunity {
     observationId: asText(row.observation_id),
     goalId: asNullableText(row.goal_id),
     title: asText(row.title),
+    kind: asText(row.kind),
     risk: asRisk(row.risk),
     status: asOpportunityStatus(row.status),
     payload: parseJsonObject(row.payload_json),
@@ -341,7 +422,9 @@ function mapEvent(row: Record<string, unknown>): ControlPlaneEvent {
 
 export function openControlPlane(sqlitePath: string) {
   const db = new DatabaseSync(sqlitePath)
+  migrateWorkspaceRiskSchema(db)
   ensureSchema(db)
+  db.exec('PRAGMA user_version = 1;')
 
   function appendEvent(
     type: string,
@@ -475,10 +558,11 @@ export function openControlPlane(sqlitePath: string) {
   function listOpportunitiesByStatus(statuses: readonly OpportunityStatus[], limit: number): Opportunity[] {
     const placeholders = statuses.map(() => '?').join(', ')
     const rows = db.prepare(`
-      SELECT *
+      SELECT opportunities.*, observations.kind AS kind
       FROM opportunities
-      WHERE status IN (${placeholders})
-      ORDER BY discovered_at ASC
+      JOIN observations ON observations.id = opportunities.observation_id
+      WHERE opportunities.status IN (${placeholders})
+      ORDER BY opportunities.discovered_at ASC
       LIMIT ?
     `).all(...statuses, limit)
 
@@ -486,9 +570,42 @@ export function openControlPlane(sqlitePath: string) {
   }
 
   function getOpportunity(opportunityId: string): Opportunity | undefined {
-    const row = db.prepare('SELECT * FROM opportunities WHERE id = ?').get(opportunityId)
+    const row = db.prepare(`
+      SELECT opportunities.*, observations.kind AS kind
+      FROM opportunities
+      JOIN observations ON observations.id = opportunities.observation_id
+      WHERE opportunities.id = ?
+    `).get(opportunityId)
 
     return row === undefined ? undefined : mapOpportunity(row)
+  }
+
+  function claimWorkspaceOpportunity(opportunityId: string, taskId: string, now: number): boolean {
+    return transaction(db, () => {
+      const opportunity = getOpportunity(opportunityId)
+
+      if (opportunity === undefined) {
+        throw new Error(`opportunity not found: ${opportunityId}`)
+      }
+
+      if (opportunity.kind !== 'development' || opportunity.risk !== 'workspace') {
+        throw new Error(`workspace execution requires a development opportunity: ${opportunityId}`)
+      }
+
+      const result = db.prepare(`
+        UPDATE opportunities
+        SET status = 'scouting', attempt_count = attempt_count + 1,
+            evidence_json = ?, updated_at = ?
+        WHERE id = ? AND status = 'discovered' AND risk = 'workspace'
+      `).run(JSON.stringify({ type: 'development_started', taskId }), now, opportunityId)
+
+      if (result.changes === 0) {
+        return false
+      }
+
+      appendEvent('opportunity.scouting', 'opportunity', opportunityId, { taskId, risk: 'workspace' }, now)
+      return true
+    })
   }
 
   function startOpportunities(opportunityIds: readonly string[], now: number) {
@@ -667,6 +784,7 @@ export function openControlPlane(sqlitePath: string) {
   return {
     db,
     appendEvent,
+    claimWorkspaceOpportunity,
     close: () => db.close(),
     countOpportunities,
     dueGoalIds,

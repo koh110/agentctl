@@ -2,7 +2,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
 
-export type Risk = 'read-only' | 'external'
+export type Risk = 'read-only' | 'workspace' | 'external'
 
 export type Observation = {
   observationId: string
@@ -18,7 +18,6 @@ export type ReadObservationsResult = {
 }
 
 const allowedKeys = new Set(['id', 'title', 'kind', 'risk', 'payload'])
-const allowedRisks = new Set(['read-only', 'external'])
 
 function isJsonObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -57,21 +56,21 @@ function optionalJsonObject(value: unknown): Record<string, unknown> {
 function asRisk(value: unknown): Risk {
   const text = asText(value)
 
-  if (!allowedRisks.has(text)) {
-    throw new Error('risk must be read-only or external')
-  }
-
-  if (text === 'read-only' || text === 'external') {
+  if (text === 'read-only' || text === 'workspace' || text === 'external') {
     return text
   }
 
-  throw new Error('risk must be read-only or external')
+  throw new Error('risk must be read-only, workspace, or external')
 }
 
 function autoObservationId(parsed: Record<string, unknown>): string {
   const hash = createHash('sha256').update(JSON.stringify(parsed)).digest('hex')
 
   return `auto:${hash.slice(0, 24)}`
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string')
 }
 
 function validateObservation(parsed: unknown): Observation {
@@ -91,7 +90,45 @@ function validateObservation(parsed: unknown): Observation {
     throw new Error('title is required')
   }
 
+  const kind = optionalText(parsed.kind, 'investigate')
   const risk = asRisk(parsed.risk)
+  const payload = optionalJsonObject(parsed.payload)
+
+  if (kind === 'development') {
+    if (risk !== 'workspace') {
+      throw new Error('development kind requires workspace risk')
+    }
+
+    if (typeof payload.task !== 'string' || payload.task.trim() === '') {
+      throw new Error('development task payload.task is required')
+    }
+
+    if (payload.task.length > 20_000 || payload.task.includes('\0')) {
+      throw new Error('development task must be at most 20000 characters and contain no NUL byte')
+    }
+
+    const verifyCommand = payload.verifyCommand
+
+    if (
+      !isStringArray(verifyCommand) ||
+      verifyCommand.length === 0 ||
+      verifyCommand.length > 64 ||
+      verifyCommand.some((value) =>
+        value.trim() === '' || value.length > 4096 || value.includes('\0')
+      )
+    ) {
+      throw new Error('development payload.verifyCommand must be a non-empty argv array of at most 64 strings')
+    }
+
+    const verifyCommandSize = verifyCommand.reduce((total, value) => total + value.length, 0)
+
+    if (verifyCommandSize > 32_768) {
+      throw new Error('development payload.verifyCommand must be at most 32768 characters total')
+    }
+  } else if (risk === 'workspace') {
+    throw new Error('workspace risk requires development kind')
+  }
+
   const rawId = parsed.id
   const observationId = rawId === undefined ? autoObservationId(parsed) : asText(rawId)
 
@@ -101,10 +138,10 @@ function validateObservation(parsed: unknown): Observation {
 
   return {
     observationId,
-    kind: optionalText(parsed.kind, 'investigate'),
+    kind,
     title,
     risk,
-    payload: optionalJsonObject(parsed.payload)
+    payload
   }
 }
 

@@ -6,6 +6,7 @@ import type { SettledTask } from '@earendil-works/pi-durable'
 
 import { loadConfig } from './config.ts'
 import { openControlPlane, type OpportunitySummary } from './control-plane.ts'
+import type { DevelopmentTaskRunner } from './development.ts'
 import { ensureScoutTask, openArayaRuntime, MAIN_GOAL_ID, readTaskGraph } from './runtime.ts'
 import { TASK_NAMES, type ScoutResult } from './tasks.ts'
 
@@ -157,10 +158,13 @@ export async function initAraya(config: ArayaConfig): Promise<StatusSnapshot> {
   return statusAraya(config)
 }
 
-export async function tickAraya(config: ArayaConfig): Promise<TickResult> {
+export async function tickAraya(
+  config: ArayaConfig,
+  options: { developmentRunner?: DevelopmentTaskRunner } = {}
+): Promise<TickResult> {
   const now = Date.now()
   const tickId = `tick:${now}`
-  const runtime = await openArayaRuntime(config)
+  const runtime = await openArayaRuntime(config, { developmentRunner: options.developmentRunner })
 
   try {
     runtime.controlPlane.ensureGoal(MAIN_GOAL_ID, '常時 scout', config.intervalMs, now)

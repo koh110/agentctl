@@ -18,9 +18,10 @@
   "scripts": {
     "araya": "node packages/araya/bin/cli.ts",
     "build": "tsc -p tsconfig.build.json",
+    "postbuild": "node scripts/copy-package-metadata.mjs",
     "deploy": "sh scripts/deploy.sh",
     "prepack": "npm run build",
-    "test": "node --test packages/araya/test",
+    "test": "npm run build && node --test packages/araya/test",
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {

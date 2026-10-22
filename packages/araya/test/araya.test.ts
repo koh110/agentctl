@@ -124,6 +124,21 @@ test('config: Pi agent directory is taken from the shared environment variable',
   assert.equal(config.piAgentDir, agentDir)
 })
 
+test('config: development project, worktree and timeout bounds are explicit', () => {
+  const config = loadConfig({
+    ARAYA_DATA_DIR: '/tmp/araya-config-test',
+    ARAYA_PROJECT_DIR: '/workspace/project',
+    ARAYA_WORKTREE_DIR: '/scratch/worktrees',
+    ARAYA_DEVELOPMENT_TIMEOUT_MS: '7000000',
+    ARAYA_VERIFICATION_TIMEOUT_MS: '500'
+  })
+
+  assert.equal(config.projectDir, '/workspace/project')
+  assert.equal(config.worktreeDir, '/scratch/worktrees')
+  assert.equal(config.developmentTimeoutMs, 60 * 60 * 1000)
+  assert.equal(config.verificationTimeoutMs, 1000)
+})
+
 test('config: retry制御は未実装のため maxAttempts を公開しない', () => {
   const config = loadConfig({ ARAYA_MAX_ATTEMPTS: '7' })
 
@@ -238,7 +253,7 @@ test('observations: 有効な JSONL を読み、不正行を errors に分離す
   assert.equal(result.observations[0]?.observationId, 'candidate:a')
   assert.equal(result.observations[1]?.observationId, 'candidate:b')
   assert.equal(result.errors.length, 1)
-  assert.match(result.errors[0] ?? '', /risk must be read-only or external/u)
+  assert.match(result.errors[0] ?? '', /risk must be read-only, workspace, or external/u)
 })
 
 test('observations: inbox の読み取りに失敗したら空入力として扱わず error を返す', async () => {
@@ -419,6 +434,56 @@ test('tick: read-only 候補は executor 不在で blocked になり、external 
   assert.equal(status.controlPlane.blocked[0]?.id, 'candidate:read-only')
   assert.equal(status.controlPlane.pendingApprovals[0]?.id, 'candidate:external')
   assert.equal(status.activeTasks.length, 0)
+})
+
+test('tick: workspace development taskを一度実行し、検証証拠を保存する', async () => {
+  const { config } = await makeConfig()
+  await fs.mkdir(config.inboxDir, { recursive: true })
+  await fs.writeFile(
+    path.join(config.inboxDir, 'development.jsonl'),
+    `${JSON.stringify({
+      id: 'development:integration',
+      kind: 'development',
+      title: '実装して検証する',
+      risk: 'workspace',
+      payload: { task: 'fixture fileを作る', verifyCommand: ['node', '--version'] }
+    })}\n`,
+    'utf8'
+  )
+  const executedIds: string[] = []
+
+  const tickResult = await tickAraya(config, {
+    developmentRunner: async (opportunity) => {
+      executedIds.push(opportunity.id)
+
+      return {
+        status: 'completed',
+        evidence: {
+          baseSha: 'a'.repeat(40),
+          worktreePath: '/tmp/araya-test-worktree',
+          branch: 'araya/development-test',
+          changedFiles: ['src/fixture.ts'],
+          verify: { command: ['node', '--version'], exitCode: 0 }
+        }
+      }
+    }
+  })
+
+  assert.equal(tickResult.status, 'due')
+  assert.equal(tickResult.settled?.state.outcome.status, 'completed')
+  assert.deepEqual(executedIds, ['development:integration'])
+
+  const controlPlane = openControlPlane(config.controlPlanePath)
+
+  try {
+    const opportunity = controlPlane.getOpportunity('development:integration')
+    assert.equal(opportunity?.kind, 'development')
+    assert.equal(opportunity?.status, 'completed')
+    assert.equal(opportunity?.evidence?.worktreePath, '/tmp/araya-test-worktree')
+    assert.deepEqual(opportunity?.evidence?.changedFiles, ['src/fixture.ts'])
+  } finally {
+    controlPlane.close()
+  }
 })
 
 test('tick: 次回起床前なら idle とし、task を増殖させない', async () => {

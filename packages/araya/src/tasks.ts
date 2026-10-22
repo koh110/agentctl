@@ -2,6 +2,7 @@ import type { Context } from '@earendil-works/chord'
 import { defineTask, type TaskId } from '@earendil-works/pi-durable'
 
 import type { ControlPlane } from './control-plane.ts'
+import type { DevelopmentTaskRunner } from './development.ts'
 import { readObservationSource } from './observations.ts'
 
 export const TASK_NAMES = {
@@ -40,6 +41,8 @@ export type WorkResult = {
     | 'approval_applied'
     | 'no_executor'
     | 'rejected'
+    | 'development_completed'
+    | 'development_failed'
     | 'failed'
   opportunityId: string
 }
@@ -64,7 +67,7 @@ function terminalFailed<R>(message: string): { status: 'terminal'; outcome: { st
   return { status: 'terminal', outcome: { status: 'failed', error: { message } } }
 }
 
-export function createWorkTask(controlPlane: ControlPlane) {
+export function createWorkTask(controlPlane: ControlPlane, developmentRunner?: DevelopmentTaskRunner) {
   const WorkTask = defineTask<WorkInput, WorkState, WorkResult>({
     name: TASK_NAMES.work,
     version: 1,
@@ -84,7 +87,8 @@ export function createWorkTask(controlPlane: ControlPlane) {
             opportunity.status === 'completed' ||
             opportunity.status === 'blocked' ||
             opportunity.status === 'approval_requested' ||
-            opportunity.status === 'rejected'
+            opportunity.status === 'rejected' ||
+            opportunity.status === 'failed'
           ) {
             const result: WorkResult = {
               status: 'already_handled',
@@ -92,6 +96,82 @@ export function createWorkTask(controlPlane: ControlPlane) {
             }
 
             return runtime.commit(() => terminalCompleted(result), context)
+          }
+
+          if (opportunity.kind === 'development' || opportunity.risk === 'workspace') {
+            if (opportunity.kind !== 'development' || opportunity.risk !== 'workspace') {
+              controlPlane.setOpportunityStatus(
+                opportunity.id,
+                'failed',
+                { type: 'invalid_development_scope', kind: opportunity.kind, risk: opportunity.risk },
+                now
+              )
+
+              return runtime.commit(() => terminalCompleted({
+                status: 'development_failed',
+                opportunityId: opportunity.id
+              }), context)
+            }
+
+            if (opportunity.status !== 'discovered') {
+              const result: WorkResult = {
+                status: 'already_handled',
+                opportunityId: opportunity.id
+              }
+
+              return runtime.commit(() => terminalCompleted(result), context)
+            }
+
+            if (developmentRunner === undefined) {
+              controlPlane.setOpportunityStatus(
+                opportunity.id,
+                'blocked',
+                { type: 'development_executor_unavailable', opportunityId: opportunity.id },
+                now
+              )
+
+              return runtime.commit(() => terminalCompleted({
+                status: 'no_executor',
+                opportunityId: opportunity.id
+              }), context)
+            }
+
+            const claimed = controlPlane.claimWorkspaceOpportunity(
+              opportunity.id,
+              String(runtime.taskId),
+              now
+            )
+
+            if (!claimed) {
+              return runtime.commit(() => terminalCompleted({
+                status: 'already_handled',
+                opportunityId: opportunity.id
+              }), context)
+            }
+
+            let execution
+
+            try {
+              execution = await developmentRunner(opportunity)
+            } catch (error) {
+              execution = {
+                status: 'failed' as const,
+                evidence: { error: error instanceof Error ? error.message : String(error) }
+              }
+            }
+
+            const status = execution.status === 'completed' ? 'completed' : 'failed'
+            const evidence = {
+              ...execution.evidence,
+              type: 'development_result',
+              outcome: execution.status
+            }
+            controlPlane.setOpportunityStatus(opportunity.id, status, evidence, runtime.now())
+
+            return runtime.commit(() => terminalCompleted({
+              status: execution.status === 'completed' ? 'development_completed' : 'development_failed',
+              opportunityId: opportunity.id
+            }), context)
           }
 
           if (opportunity.status === 'discovered') {
@@ -268,7 +348,25 @@ export function createScoutTask(
           return
         }
 
-        const selected = actionable.slice(0, task.input.maxActions)
+        const selected: typeof actionable = []
+        let developmentSelected = false
+
+        for (const opportunity of actionable) {
+          if (selected.length >= task.input.maxActions) {
+            break
+          }
+
+          if (opportunity.risk === 'workspace') {
+            if (developmentSelected) {
+              continue
+            }
+
+            developmentSelected = true
+          }
+
+          selected.push(opportunity)
+        }
+
         const selectedIds = selected.map((opportunity) => opportunity.id)
         const childTaskIds: TaskId<WorkResult>[] = []
 
@@ -350,9 +448,10 @@ export function createArayaTasks(
   controlPlane: ControlPlane,
   inboxDir: string,
   goalId: string,
-  goalIntervalMs: number
+  goalIntervalMs: number,
+  developmentRunner?: DevelopmentTaskRunner
 ): ArayaTasks {
-  const WorkTask = createWorkTask(controlPlane)
+  const WorkTask = createWorkTask(controlPlane, developmentRunner)
   const ScoutTask = createScoutTask(controlPlane, WorkTask, inboxDir, goalId, goalIntervalMs)
 
   return { ScoutTask, WorkTask }

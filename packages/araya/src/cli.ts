@@ -31,7 +31,7 @@ function printHelp() {
     状態領域と seed inbox を作成し、初期状態を status.json へ書き出す。
 
   araya tick
-    1回だけ due goal を処理し、Scout task を完了まで待つ。
+    1回だけ due goal を処理し、開発課題は専用worktreeで実装・検証する。
 
   araya status
     control plane と live task graph を読み、status.json へ書き出す。
@@ -53,6 +53,10 @@ function printHelp() {
   ARAYA_PI_DURABLE_PATH
   ARAYA_INTERVAL_MS
   ARAYA_MAX_ACTIONS
+  ARAYA_PROJECT_DIR
+  ARAYA_WORKTREE_DIR
+  ARAYA_DEVELOPMENT_TIMEOUT_MS
+  ARAYA_VERIFICATION_TIMEOUT_MS
   PI_CODING_AGENT_DIR
 `)
 }

@@ -13,6 +13,7 @@ import {
 } from '@earendil-works/pi-durable'
 
 import { openControlPlane, type ControlPlane } from './control-plane.ts'
+import { createDevelopmentExecutor, type DevelopmentTaskRunner } from './development.ts'
 import { createArayaTasks, TASK_NAMES, type ArayaTasks, type ScoutInput, type ScoutResult } from './tasks.ts'
 
 export const MAIN_GOAL_ID = 'araya:goal:main'
@@ -48,18 +49,30 @@ export async function openArayaRuntime(
     piDurablePath: string
     intervalMs: number
     piAgentDir?: string
+    projectDir: string
+    worktreeDir: string
+    developmentTimeoutMs: number
+    verificationTimeoutMs: number
   },
-  options: { resumeTasks?: boolean } = {}
+  options: { resumeTasks?: boolean; developmentRunner?: DevelopmentTaskRunner } = {}
 ): Promise<ArayaRuntime> {
   await ensureParentDir(config.controlPlanePath)
   await ensureParentDir(config.piDurablePath)
 
   const controlPlane = openControlPlane(config.controlPlanePath)
+  const developmentRunner = options.developmentRunner ?? createDevelopmentExecutor({
+    projectDir: config.projectDir,
+    worktreeDir: config.worktreeDir,
+    ...(config.piAgentDir === undefined ? {} : { agentDir: config.piAgentDir }),
+    taskTimeoutMs: config.developmentTimeoutMs,
+    verificationTimeoutMs: config.verificationTimeoutMs
+  })
   const tasks = createArayaTasks(
     controlPlane,
     config.inboxDir,
     MAIN_GOAL_ID,
-    config.intervalMs
+    config.intervalMs,
+    developmentRunner
   )
 
   const { openNodeSqliteStorage } = await import('@earendil-works/pi-durable/storage/sqlite/node')
