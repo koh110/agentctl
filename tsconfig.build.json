@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "packages/araya/dist",
+    "rootDir": "packages/araya",
+    "rewriteRelativeImportExtensions": true
+  },
+  "include": [
+    "packages/araya/bin/**/*.ts",
+    "packages/araya/src/**/*.ts"
+  ]
+}
