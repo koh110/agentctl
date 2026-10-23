@@ -6,6 +6,7 @@ import path from 'node:path'
 import { TextDecoder } from 'node:util'
 
 import type { Opportunity } from './control-plane.ts'
+import { parseSessionModel, type DevelopmentModel, type SessionModel } from './development-model.ts'
 import {
   runBoundedCommand,
   runPiWorker,
@@ -60,10 +61,12 @@ export type DevelopmentExecutorOptions = {
   agentDir?: string
   taskTimeoutMs?: number
   verificationTimeoutMs?: number
+  // 設定ファイルで指定した model。省略か null なら Pi の設定で選ぶ
+  developmentModel?: DevelopmentModel | null
 }
 
 type DevelopmentExecutorDependencies = {
-  runAgent?: (input: PiWorkerInput) => Promise<{ summary: string }>
+  runAgent?: (input: PiWorkerInput) => Promise<{ summary: string; model: SessionModel }>
   runVerification?: (input: VerificationCommandInput) => Promise<VerificationCommandResult>
   // 差分の収集に使う git（test 用）
   gitExecutable?: string
@@ -82,9 +85,18 @@ type FailureReason =
   | 'verification_missing'
   | 'verification_failed'
 
+// model は worker が報告した session の model と、それを選んだ設定の出どころ
+type AgentModelEvidence = SessionModel & { source: 'araya-config' | 'pi-settings' }
+
 type AgentOutcome =
-  | { status: 'completed'; summary: string }
-  | { status: 'failed' | 'timeout'; error: string; workerErrorName?: string; workerErrorMessage?: string }
+  | { status: 'completed'; summary: string; model: AgentModelEvidence }
+  | {
+    status: 'failed' | 'timeout'
+    error: string
+    workerErrorName?: string
+    workerErrorMessage?: string
+    model?: AgentModelEvidence
+  }
 
 type GitContext = {
   executable: string
@@ -579,13 +591,14 @@ function toWorktreeLocation(record: WorktreeRecord) {
 
 function agentEvidence(agent: AgentOutcome) {
   if (agent.status === 'completed') {
-    return { summary: agent.summary }
+    return { summary: agent.summary, model: agent.model }
   }
 
   return {
     agentError: agent.error,
     ...(agent.workerErrorName === undefined ? {} : { workerErrorName: agent.workerErrorName }),
-    ...(agent.workerErrorMessage === undefined ? {} : { workerErrorMessage: agent.workerErrorMessage })
+    ...(agent.workerErrorMessage === undefined ? {} : { workerErrorMessage: agent.workerErrorMessage }),
+    ...(agent.model === undefined ? {} : { model: agent.model })
   }
 }
 
@@ -600,6 +613,8 @@ export function createDevelopmentExecutor(
     return runPiWorker(input)
   })
   const runVerification = dependencies.runVerification ?? runVerificationCommand
+  const developmentModel = options.developmentModel ?? null
+  const modelSource = developmentModel === null ? 'pi-settings' : 'araya-config'
   validateTimeout(taskTimeoutMs, 'taskTimeoutMs')
   validateTimeout(verificationTimeoutMs, 'verificationTimeoutMs')
 
@@ -654,9 +669,14 @@ export function createDevelopmentExecutor(
         title: opportunity.title,
         task,
         timeoutMs: taskTimeoutMs,
+        model: developmentModel,
         env: options.env
       })
-      agent = { status: 'completed', summary: result.summary.slice(0, MAX_SUMMARY_CHARS) }
+      agent = {
+        status: 'completed',
+        summary: result.summary.slice(0, MAX_SUMMARY_CHARS),
+        model: { ...result.model, source: modelSource }
+      }
     } catch (error) {
       if (isTerminationUnconfirmed(error)) {
         // 終了を確認できない worker が worktree を変更し続けるかもしれないため、差分も検証も扱わない
@@ -666,11 +686,14 @@ export function createDevelopmentExecutor(
       const code = getErrorCode(error)
       const workerErrorName = getStringProperty(error, 'workerErrorName')
       const workerErrorMessage = getStringProperty(error, 'workerErrorMessage')
+      // session の model が決まる前の失敗、timeout、不正な出力などでは worker は model を報告しない
+      const workerModel = error instanceof Error && 'workerModel' in error ? parseSessionModel(error.workerModel) : undefined
       agent = {
         status: code === 'agent_timeout' ? 'timeout' : 'failed',
         error: code,
         ...(workerErrorName === undefined ? {} : { workerErrorName }),
-        ...(workerErrorMessage === undefined ? {} : { workerErrorMessage })
+        ...(workerErrorMessage === undefined ? {} : { workerErrorMessage }),
+        ...(workerModel === undefined ? {} : { model: { ...workerModel, source: modelSource } })
       }
     }
 

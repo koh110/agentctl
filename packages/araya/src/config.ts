@@ -1,6 +1,11 @@
 import os from 'node:os'
 import path from 'node:path'
 
+import type { DevelopmentModel } from './development-model.ts'
+
+// 設定ファイルの値は CLI が loadConfigFile で読んで置き換える。読まない経路（test など）では model を指定しない
+const NO_DEVELOPMENT_MODEL: DevelopmentModel | null = null
+
 function numberFromEnv(
   value: string | undefined,
   fallback: number,
@@ -28,6 +33,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
 
   return {
     dataDir,
+    configPath: path.join(dataDir, 'config.json'),
     devRoot: path.resolve(env.ARAYA_DEV_ROOT || path.join(os.homedir(), 'dev')),
     piAgentDir: env.PI_CODING_AGENT_DIR || undefined,
     inboxDir: path.resolve(env.ARAYA_INBOX_DIR ?? path.join(dataDir, 'inbox')),
@@ -44,6 +50,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
       minimum: 1000,
       maximum: 60 * 60 * 1000
     }),
+    developmentModel: NO_DEVELOPMENT_MODEL,
     // 子 process（development worker、検証コマンド、git）に引き継ぐ環境変数
     env: { ...env }
   }

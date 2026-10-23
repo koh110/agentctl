@@ -1,5 +1,6 @@
 import { parseCliArguments } from './arguments.ts'
 import { loadConfig } from './config.ts'
+import { loadConfigFile } from './config-file.ts'
 import {
   approveOpportunity,
   initAraya,
@@ -45,6 +46,10 @@ function printHelp() {
   araya reject <opportunityId> [note...]
     候補を却下する。
 
+設定ファイル:
+  <ARAYA_DATA_DIR>/config.json（既定: ~/.araya/config.json）
+    開発 agent の model と thinking level を指定する。subcommand の起動時に1回だけ読む。
+
 環境変数:
   ARAYA_DATA_DIR
   ARAYA_INBOX_DIR
@@ -64,7 +69,10 @@ function printJson(value: unknown) {
   console.log(JSON.stringify(value, null, 2))
 }
 
-export async function runCli(args: string[], startPi = launchPi) {
+const SUBCOMMANDS = ['init', 'tick', 'status', 'run', 'approve', 'reject']
+
+// env は test 用。省略時は loadConfig が process.env を読む
+export async function runCli(args: string[], startPi = launchPi, env?: NodeJS.ProcessEnv) {
   if (args.length === 0) {
     await startPi([])
     return
@@ -83,7 +91,15 @@ export async function runCli(args: string[], startPi = launchPi) {
     return
   }
 
-  const config = loadConfig()
+  if (!SUBCOMMANDS.includes(command)) {
+    printHelp()
+    throw new Error(`不明な command: ${command}`)
+  }
+
+  // 設定ファイルは subcommand を処理する前に1回だけ読む。実行中に書き換えても再起動するまで反映しない
+  const baseConfig = loadConfig(env)
+  const { developmentModel } = await loadConfigFile(baseConfig.configPath)
+  const config = { ...baseConfig, developmentModel }
 
   if (command === 'init') {
     printJson(await initAraya(config))
@@ -118,9 +134,5 @@ export async function runCli(args: string[], startPi = launchPi) {
       : rejectOpportunity(config, opportunityId, note)
 
     printJson(result)
-    return
   }
-
-  printHelp()
-  throw new Error(`不明な command: ${command}`)
 }

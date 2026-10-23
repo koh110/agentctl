@@ -7,6 +7,7 @@ import type { SettledTask } from '@earendil-works/pi-durable'
 import { loadConfig } from './config.ts'
 import { openControlPlane, type OpportunitySummary } from './control-plane.ts'
 import type { DevelopmentTaskRunner } from './development.ts'
+import { formatModel } from './development-model.ts'
 import { ensureScoutTask, openArayaRuntime, MAIN_GOAL_ID, readTaskGraph } from './runtime.ts'
 import { TASK_NAMES, type ScoutResult } from './tasks.ts'
 
@@ -16,6 +17,8 @@ export type StatusSnapshot = {
   capturedAt: number
   config: {
     dataDir: string
+    configPath: string
+    developmentModel: { model: string; thinkingLevel: string | null } | null
     inboxDir: string
     statusFile: string
     controlPlanePath: string
@@ -43,9 +46,16 @@ export type TickResult = {
   error?: string
 }
 
+// model が実際に使えるかは表示しない（status は Pi の認証を読まない）
 function publicConfig(config: ArayaConfig) {
+  const developmentModel = config.developmentModel
+
   return {
     dataDir: config.dataDir,
+    configPath: config.configPath,
+    developmentModel: developmentModel === null
+      ? null
+      : { model: formatModel(developmentModel), thinkingLevel: developmentModel.thinkingLevel },
     inboxDir: config.inboxDir,
     statusFile: config.statusFile,
     controlPlanePath: config.controlPlanePath,

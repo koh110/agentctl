@@ -44,6 +44,7 @@ test('build 済みの package は JavaScript の worker を起動し、model が
       title: 'Do not make a model request',
       task: 'No model is configured in this isolated test.',
       timeoutMs: 30_000,
+      model: null,
       env: { HOME: home, XDG_CONFIG_HOME: path.join(home, '.config') }
     }), (error: unknown) => {
       return error instanceof Error &&

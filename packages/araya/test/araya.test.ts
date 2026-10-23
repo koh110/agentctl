@@ -139,6 +139,14 @@ test('config: 開発 root と timeout の範囲を設定から読む', () => {
   assert.equal(config.verificationTimeoutMs, 1000)
 })
 
+test('config: 設定ファイルの path は data directory の config.json で、設定ファイルの値を受け取らなければ model を指定しない', () => {
+  const config = loadConfig({ ARAYA_DATA_DIR: '/tmp/araya-config-test' })
+
+  assert.equal(config.configPath, '/tmp/araya-config-test/config.json')
+  assert.equal(config.developmentModel, null)
+  assert.equal(loadConfig({}).configPath, path.join(os.homedir(), '.araya', 'config.json'))
+})
+
 test('config: 開発 root の既定は home の dev で、空文字は未指定として扱う', () => {
   assert.equal(loadConfig({}).devRoot, path.join(os.homedir(), 'dev'))
   assert.equal(loadConfig({ ARAYA_DEV_ROOT: '' }).devRoot, path.join(os.homedir(), 'dev'))
@@ -222,6 +230,145 @@ test('CLI: Pi SDK はグローバル pi コマンドなしで使える', async (
   assert.equal(result.code, 0)
   assert.match(stdout.trim(), /^\d+\.\d+\.\d+$/)
   assert.equal(stderr, '')
+})
+
+async function captureConsoleLog(run: () => Promise<void>) {
+  const lines: string[] = []
+  const originalLog = console.log
+  console.log = (...values: unknown[]) => {
+    lines.push(values.map(String).join(' '))
+  }
+
+  try {
+    await run()
+  } finally {
+    console.log = originalLog
+  }
+
+  return lines.join('\n')
+}
+
+test('CLI: 不正な設定ファイルでは subcommand を何も処理せずに失敗し、message に path が入る', async () => {
+  const dataDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'araya-cli-config-test-')))
+  const configPath = path.join(dataDir, 'config.json')
+  await fs.writeFile(configPath, JSON.stringify({ development: { model: 'openai/gpt-5.5', fallbackModels: [] } }), 'utf8')
+  const env = { ARAYA_DATA_DIR: dataDir, PI_CODING_AGENT_DIR: path.join(dataDir, 'pi-agent') }
+
+  try {
+    for (const args of [['init'], ['tick'], ['status'], ['run'], ['approve', 'candidate:x'], ['reject', 'candidate:x']]) {
+      const name = args.join(' ')
+      const output = await captureConsoleLog(async () => {
+        await assert.rejects(runCli(args, async () => {}, env), (error: unknown) => {
+          assert.ok(error instanceof Error, name)
+          assert.equal(error.message.startsWith(`invalid Araya config file ${configPath}: `), true, name)
+          return true
+        })
+      })
+
+      assert.equal(output, '', name)
+      assert.deepEqual(await fs.readdir(dataDir), ['config.json'], name)
+    }
+  } finally {
+    await fs.rm(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('CLI: 引数なし、pi subcommand、help は設定ファイルを読まない', async () => {
+  const dataDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'araya-cli-config-test-')))
+  await fs.writeFile(path.join(dataDir, 'config.json'), 'not json', 'utf8')
+  const env = { ARAYA_DATA_DIR: dataDir }
+  const started: string[][] = []
+
+  try {
+    await runCli([], async (args) => {
+      started.push(args)
+    }, env)
+    await runCli(['pi', '--version'], async (args) => {
+      started.push(args)
+    }, env)
+    const help = await captureConsoleLog(async () => {
+      await runCli(['--help'], async () => {}, env)
+      await runCli(['help'], async () => {}, env)
+    })
+
+    assert.deepEqual(started, [[], ['--version']])
+    assert.match(help, /araya status/u)
+  } finally {
+    await fs.rm(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('CLI: 不正な設定ファイルでは exit code 1 で終わり、path を含む message を出す', async () => {
+  const dataDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'araya-cli-config-test-')))
+  const configPath = path.join(dataDir, 'config.json')
+  await fs.mkdir(configPath)
+  const cliPath = fileURLToPath(new URL('../bin/cli.ts', import.meta.url))
+
+  try {
+    const child = spawn(process.execPath, [cliPath, 'status'], {
+      env: { PATH: process.env.PATH, HOME: dataDir, ARAYA_DATA_DIR: dataDir, PI_CODING_AGENT_DIR: path.join(dataDir, 'pi-agent') },
+      stdio: ['ignore', 'pipe', 'pipe']
+    })
+    const stdout: string[] = []
+    const stderr: string[] = []
+    child.stdout.setEncoding('utf8').on('data', (chunk: string) => stdout.push(chunk))
+    child.stderr.setEncoding('utf8').on('data', (chunk: string) => stderr.push(chunk))
+    const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
+      child.once('error', reject)
+      child.once('close', (code, signal) => resolve({ code, signal }))
+    })
+
+    assert.deepEqual(exit, { code: 1, signal: null })
+    assert.equal(stdout.join(''), '')
+    assert.equal(stderr.join(''), `invalid Araya config file ${configPath}: not a regular file\n`)
+    assert.deepEqual(await fs.readdir(dataDir), ['config.json'])
+  } finally {
+    await fs.rm(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('status: 設定ファイルの path と指定した model と thinking level を表示し、status.json に書く', async () => {
+  const dataDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'araya-cli-config-test-')))
+  const configPath = path.join(dataDir, 'config.json')
+  const env = { ARAYA_DATA_DIR: dataDir, PI_CODING_AGENT_DIR: path.join(dataDir, 'pi-agent') }
+
+  try {
+    await fs.writeFile(configPath, JSON.stringify({ development: { model: 'openrouter/moonshotai/kimi-k2.6', thinkingLevel: 'high' } }), 'utf8')
+    const output: unknown = JSON.parse(await captureConsoleLog(async () => {
+      await runCli(['status'], async () => {}, env)
+    }))
+    const written: unknown = JSON.parse(await fs.readFile(path.join(dataDir, 'status.json'), 'utf8'))
+
+    for (const snapshot of [output, written]) {
+      assert.ok(snapshot !== null && typeof snapshot === 'object' && 'config' in snapshot)
+      assert.ok(snapshot.config !== null && typeof snapshot.config === 'object')
+      assert.ok('configPath' in snapshot.config && 'developmentModel' in snapshot.config)
+      assert.equal(snapshot.config.configPath, configPath)
+      assert.deepEqual(snapshot.config.developmentModel, { model: 'openrouter/moonshotai/kimi-k2.6', thinkingLevel: 'high' })
+    }
+
+    await fs.writeFile(configPath, JSON.stringify({ development: { model: 'openai/gpt-5.5' } }), 'utf8')
+    const withoutThinkingLevel = await captureConsoleLog(async () => {
+      await runCli(['status'], async () => {}, env)
+    })
+
+    assert.match(withoutThinkingLevel, /"developmentModel": \{\n\s+"model": "openai\/gpt-5\.5",\n\s+"thinkingLevel": null\n\s+\}/u)
+  } finally {
+    await fs.rm(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('status: 設定ファイルが無ければ developmentModel は null', async () => {
+  const { dir, config } = await makeConfig()
+
+  try {
+    const snapshot = await statusAraya(config)
+
+    assert.equal(snapshot.config.configPath, path.join(dir, 'config.json'))
+    assert.equal(snapshot.config.developmentModel, null)
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
 })
 
 test('status: pending task の実行を再開せず、制御 plane を変えない', async () => {

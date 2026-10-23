@@ -95,6 +95,31 @@ npm run araya -- reject <opportunityId> [note...]
 - `ARAYA_VERIFICATION_TIMEOUT_MS` — 検証command 1件ごとのtimeout（既定: 300000 ms、範囲: 1000〜3600000 ms）
 - `PI_CODING_AGENT_DIR` — Pi の agent directory。Pi と Araya の両方で同じ値を使うと、`tick` / `run` のモデルruntimeと開発agentが同じ `auth.json` と `models.json` を参照します。未指定時は `~/.pi/agent` を使用します。
 
+### 設定ファイル
+
+開発課題を実行する Pi agent の model と thinking level は、設定ファイル `<dataDir>/config.json`（既定: `~/.araya/config.json`）で指定します。場所は `ARAYA_DATA_DIR` に従い、設定ファイルの場所だけを変える環境変数はありません。
+
+```json
+{
+  "development": {
+    "model": "openai/gpt-5.5",
+    "thinkingLevel": "high"
+  }
+}
+```
+
+- 形式は UTF-8 の JSON object で、64 KiB まで。top level の key は `development`（省略可）だけで、`{}` やファイルが無い場合は従来どおり Pi の設定（`settings.json` の `defaultProvider`・`defaultModel` など）で model を選びます。
+- `development.model`（必須）: `<provider>/<model id>`。最初の `/` で provider と model id に分けるため、model id には `/` を含められます（例: `openrouter/moonshotai/kimi-k2.6`）。provider と model id は空にできず、空白と制御文字を含めず、全体で200文字まで。
+- `development.thinkingLevel`（省略可）: `off`・`minimal`・`low`・`medium`・`high`・`xhigh`・`max` のいずれか。省略すると Pi の設定（`modelThinkingLevels["<provider>/<id>"]` → `defaultThinkingLevel` → `medium`）で決まります。Pi は model が対応しない thinking level を対応する値に丸めます。
+- 知らない key、型の違う値、`null` は拒否します。ファイルが存在するのに使えない場合（JSON の誤り、schema 違反、64 KiB 超、UTF-8 でない、通常の file でない、壊れた symlink、読めない）は、`init`・`tick`・`status`・`run`・`approve`・`reject` が何も処理せずに `invalid Araya config file <path>: <理由>` で失敗します（exit code 1）。引数なしの `araya`・`araya pi`・`araya --help` は設定ファイルを読みません。
+- 設定ファイルは subcommand の起動時に1回だけ読みます。`araya run` の実行中に書き換えた内容は、再起動するまで反映されません。
+- 指定した model が Pi の model 一覧に無い、または Pi の認証（`auth.json` など）が無いときは、別の model に切り替えず、agent を動かさずに課題を失敗にします。`failureReason` は `agent_failed`、evidence の `workerErrorName` は `ModelUnavailableError` です。課題は自動で再実行しないため、設定を直したら別の id で課題を入れ直してください。
+- 使った model は課題の evidence の `model`（`provider`・`id`・丸めた後の `thinkingLevel`・`source`）に記録します。`source` は設定ファイルで指定したとき `araya-config`、Pi の設定で選んだとき `pi-settings` です。
+- `araya status` の出力と `status.json` の `config` に、`configPath` と `developmentModel`（`{ "model": "<provider>/<id>", "thinkingLevel": ... }`、未指定なら `null`）が入ります。status は Pi の認証を読まないため、model が実際に使えるかは表示しません。
+- 利用上限に達したときの fallback model と自動 retry は未対応です。`fallbackModels` などの key は知らない key として拒否します。
+
+詳細は [docs/spec/development-model-config.md](docs/spec/development-model-config.md) を参照してください。
+
 ## 状態と安全境界
 
 - `araya.sqlite` が Goal、Opportunity、承認、Event、Outbox を保持します。

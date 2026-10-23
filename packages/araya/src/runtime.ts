@@ -14,6 +14,7 @@ import {
 
 import { openControlPlane, type ControlPlane } from './control-plane.ts'
 import { createDevelopmentExecutor, type DevelopmentTaskRunner } from './development.ts'
+import type { DevelopmentModel } from './development-model.ts'
 import { createArayaTasks, TASK_NAMES, type ArayaTasks, type ScoutInput, type ScoutResult } from './tasks.ts'
 
 export const MAIN_GOAL_ID = 'araya:goal:main'
@@ -54,6 +55,7 @@ export async function openArayaRuntime(
     piAgentDir?: string
     developmentTimeoutMs: number
     verificationTimeoutMs: number
+    developmentModel: DevelopmentModel | null
   },
   options: { resumeTasks?: boolean; developmentRunner?: DevelopmentTaskRunner } = {}
 ): Promise<ArayaRuntime> {
@@ -67,7 +69,8 @@ export async function openArayaRuntime(
     env: config.env,
     ...(config.piAgentDir === undefined ? {} : { agentDir: config.piAgentDir }),
     taskTimeoutMs: config.developmentTimeoutMs,
-    verificationTimeoutMs: config.verificationTimeoutMs
+    verificationTimeoutMs: config.verificationTimeoutMs,
+    developmentModel: config.developmentModel
   })
   const tasks = createArayaTasks(
     controlPlane,

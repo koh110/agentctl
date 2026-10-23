@@ -10,6 +10,7 @@ import {
 import type { CreateAgentSessionOptions } from '@earendil-works/pi-coding-agent'
 import path from 'node:path'
 
+import { formatModel, type DevelopmentModel, type SessionModel, type ThinkingLevel } from './development-model.ts'
 import { createWorktreeService } from './development-worktrees.ts'
 
 export const DEVELOPMENT_TOOL_NAMES = [
@@ -33,12 +34,18 @@ export type DevelopmentAgentInput = {
   stateDir: string
   taskKey: string
   agentDir: string
+  // 設定ファイルで指定した model。null なら Pi の設定で選ぶ
+  model: DevelopmentModel | null
   env: Readonly<Record<string, string | undefined>>
   signal?: AbortSignal
+  // session の model が決まったときに呼ぶ。その後に失敗しても、使った model を報告できるようにする
+  onSessionModel?: (model: SessionModel) => void
 }
 
 type DevelopmentAgentSession = {
   hasModel: boolean
+  model: { provider: string; id: string } | undefined
+  thinkingLevel: ThinkingLevel
   activeToolNames: () => string[]
   callableToolNames: () => string[]
   sendUserMessage: (prompt: string) => Promise<void>
@@ -57,6 +64,13 @@ type WorktreeService = ReturnType<typeof createWorktreeService>
 function createAbortError() {
   const error = new Error('development agent was aborted')
   error.name = 'AbortError'
+  return error
+}
+
+// 指定した model が使えないときの失敗。別の model には切り替えない
+function createModelUnavailableError(message: string) {
+  const error = new Error(message)
+  error.name = 'ModelUnavailableError'
   return error
 }
 
@@ -224,6 +238,8 @@ async function createPiSession(options: CreateAgentSessionOptions) {
   const { session } = await createAgentSession(options)
   const wrapper: DevelopmentAgentSession = {
     hasModel: hasUsableModel(session.model, options.modelRuntime),
+    model: session.model === undefined ? undefined : { provider: session.model.provider, id: session.model.id },
+    thinkingLevel: session.thinkingLevel,
     activeToolNames: () => {
       return session.getActiveToolNames()
     },
@@ -268,6 +284,20 @@ export async function runDevelopmentAgent(
   })
   // refreshOnCreate: false のままでは使える model の一覧が空なので、network を使わずに auth から作り直す
   await modelRuntime.refresh({ allowNetwork: false })
+
+  const configuredModel = input.model === null ? undefined : modelRuntime.getModel(input.model.provider, input.model.id)
+
+  // 指定した model が使えなければ、session を作らずに失敗する
+  if (input.model !== null) {
+    if (configuredModel === undefined) {
+      throw createModelUnavailableError(`configured model ${formatModel(input.model)} is not in the Pi model list`)
+    }
+
+    if (!hasUsableModel(configuredModel, modelRuntime)) {
+      throw createModelUnavailableError(`configured model ${formatModel(input.model)} has no Pi authentication`)
+    }
+  }
+
   const resourceLoader = new DefaultResourceLoader({
     cwd: input.devRoot,
     agentDir: input.agentDir,
@@ -298,7 +328,10 @@ export async function runDevelopmentAgent(
     resourceLoader,
     noTools: 'all',
     tools: [...DEVELOPMENT_TOOL_NAMES],
-    customTools: createArayaTools(service)
+    customTools: createArayaTools(service),
+    // thinkingLevel を渡さなければ Pi の設定で決まる。どちらの場合も Pi が model の対応範囲に丸める
+    ...(configuredModel === undefined ? {} : { model: configuredModel }),
+    ...(input.model === null || input.model.thinkingLevel === null ? {} : { thinkingLevel: input.model.thinkingLevel })
   }
   const session = await (dependencies.createSession ?? createPiSession)(sessionOptions)
 
@@ -307,9 +340,22 @@ export async function runDevelopmentAgent(
   }
 
   try {
-    if (!session.hasModel) {
-      throw new Error('no configured Pi model is available')
+    const actualModel = session.model
+
+    if (input.model !== null && (actualModel === undefined || actualModel.provider !== input.model.provider || actualModel.id !== input.model.id)) {
+      throw createModelUnavailableError(
+        `Pi session model ${actualModel === undefined ? 'none' : formatModel(actualModel)} does not match the configured model ${formatModel(input.model)}`
+      )
     }
+
+    if (!session.hasModel || actualModel === undefined) {
+      throw input.model === null
+        ? new Error('no configured Pi model is available')
+        : createModelUnavailableError(`configured model ${formatModel(input.model)} has no Pi authentication`)
+    }
+
+    const sessionModel: SessionModel = { provider: actualModel.provider, id: actualModel.id, thinkingLevel: session.thinkingLevel }
+    input.onSessionModel?.(sessionModel)
 
     if (!sameNames(session.activeToolNames()) || !sameNames(session.callableToolNames())) {
       throw new Error(`Pi session tool set does not match the development allowlist (${DEVELOPMENT_TOOL_NAMES.join(', ')})`)
@@ -339,7 +385,7 @@ export async function runDevelopmentAgent(
       throw new Error('Pi session did not return a final assistant summary')
     }
 
-    return { summary: summary.slice(0, MAX_SUMMARY_CHARS) }
+    return { summary: summary.slice(0, MAX_SUMMARY_CHARS), model: sessionModel }
   } finally {
     input.signal?.removeEventListener('abort', abortSession)
     session.dispose()

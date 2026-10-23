@@ -3,13 +3,14 @@ import { TextDecoder } from 'node:util'
 
 import { loadConfig } from '../src/config.ts'
 import { runDevelopmentAgent } from '../src/development-agent.ts'
+import { parseRequestedModel, type SessionModel } from '../src/development-model.ts'
 
 const MAX_INPUT_BYTES = 64 * 1024
 const MAX_TASK_CHARS = 20_000
 const MAX_TITLE_CHARS = 1000
 const MAX_TIMEOUT_MS = 60 * 60 * 1000
 const MAX_ERROR_MESSAGE_CHARS = 500
-const INPUT_KEYS = 'agentDir,devRoot,stateDir,task,taskKey,timeoutMs,title'
+const INPUT_KEYS = 'agentDir,devRoot,model,stateDir,task,taskKey,timeoutMs,title'
 const TASK_KEY_PATTERN = /^development-[0-9a-f]{20}$/u
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -71,6 +72,7 @@ async function readInput() {
   const agentDir = validateAbsolutePath(parsed.agentDir, 'agentDir')
   const devRoot = validateAbsolutePath(parsed.devRoot, 'devRoot')
   const stateDir = validateAbsolutePath(parsed.stateDir, 'stateDir')
+  const model = parseRequestedModel(parsed.model)
 
   if (typeof taskKey !== 'string' || !TASK_KEY_PATTERN.test(taskKey)) {
     throw new Error('worker taskKey is invalid')
@@ -103,7 +105,7 @@ async function readInput() {
     throw new Error('worker timeout is invalid')
   }
 
-  return { agentDir, devRoot, stateDir, task, taskKey, title }
+  return { agentDir, devRoot, model, stateDir, task, taskKey, title }
 }
 
 function finish(response: Record<string, unknown>, exitCode: number) {
@@ -123,6 +125,13 @@ async function main() {
   process.on('SIGTERM', abort)
   process.on('SIGINT', abort)
 
+  // session の model が決まった後の失敗でも、使った model を返す
+  let sessionModel: SessionModel | null = null
+
+  function recordSessionModel(model: SessionModel) {
+    sessionModel = model
+  }
+
   try {
     const input = await readInput()
 
@@ -134,7 +143,8 @@ async function main() {
     const result = await runDevelopmentAgent({
       ...input,
       env: loadConfig().env,
-      signal: controller.signal
+      signal: controller.signal,
+      onSessionModel: recordSessionModel
     })
 
     if (controller.signal.aborted) {
@@ -143,9 +153,9 @@ async function main() {
       throw error
     }
 
-    finish({ status: 'completed', summary: result.summary }, 0)
+    finish({ status: 'completed', summary: result.summary, model: result.model }, 0)
   } catch (error) {
-    finish({ status: 'failed', errorName: safeErrorName(error), errorMessage: safeErrorMessage(error) }, 1)
+    finish({ status: 'failed', errorName: safeErrorName(error), errorMessage: safeErrorMessage(error), model: sessionModel }, 1)
   }
 }
 

@@ -31,6 +31,7 @@ Araya は sandbox による隔離を行わない。agent と検証コマンド�
 - `ARAYA_VERIFICATION_TIMEOUT_MS`: 検証コマンド1件ごとの上限。既定 5分、範囲 1秒〜60分。
 - `PI_CODING_AGENT_DIR`: Pi の agent directory。既定は `<home>/.pi/agent`。
 - `ARAYA_PROJECT_DIR` と `ARAYA_WORKTREE_DIR` は廃止する。環境変数は既存どおり `config.ts` だけで読む。
+- 開発 agent の model と thinking level は、設定ファイル `<dataDir>/config.json` で指定する。仕様は [設定ファイルによる開発 agent の model 指定](development-model-config.md) を参照する。
 
 ## 課題の識別子と状態 directory
 

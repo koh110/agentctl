@@ -4,6 +4,8 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { TextDecoder } from 'node:util'
 
+import { parseSessionModel, type DevelopmentModel } from './development-model.ts'
+
 const MAX_STDOUT_BYTES = 128 * 1024
 const MAX_STDERR_BYTES = 64 * 1024
 const MAX_TERMINATION_GRACE_MS = 60 * 1000
@@ -43,6 +45,8 @@ export type PiWorkerInput = {
   title: string
   task: string
   timeoutMs: number
+  // 設定ファイルで指定した model。null なら Pi の設定で選ぶ
+  model: DevelopmentModel | null
   env: Readonly<Record<string, string | undefined>>
 }
 
@@ -77,7 +81,7 @@ function makeProcessError(
   message: string,
   terminationConfirmed: boolean,
   code: string,
-  extra: Record<string, string> = {}
+  extra: Record<string, unknown> = {}
 ) {
   return Object.assign(new Error(message), { terminationConfirmed, code, ...extra })
 }
@@ -366,6 +370,7 @@ async function resolveWorkerPath() {
   return workerPath
 }
 
+// model は、session の model が決まった後なら実際の session の値、決まる前の失敗なら null
 function parseWorkerResponse(value: unknown) {
   if (!isRecord(value)) {
     return undefined
@@ -373,19 +378,25 @@ function parseWorkerResponse(value: unknown) {
 
   const keys = Object.keys(value).sort().join(',')
 
-  if (keys === 'status,summary' && value.status === 'completed' && typeof value.summary === 'string') {
-    return { status: 'completed' as const, summary: value.summary }
+  if (keys === 'model,status,summary' && value.status === 'completed' && typeof value.summary === 'string') {
+    const model = parseSessionModel(value.model)
+
+    return model === undefined ? undefined : { status: 'completed' as const, summary: value.summary, model }
   }
 
   if (
-    keys === 'errorMessage,errorName,status' &&
+    keys === 'errorMessage,errorName,model,status' &&
     value.status === 'failed' &&
     typeof value.errorName === 'string' &&
     WORKER_ERROR_NAME_PATTERN.test(value.errorName) &&
     typeof value.errorMessage === 'string' &&
     value.errorMessage.length <= MAX_WORKER_ERROR_MESSAGE_CHARS
   ) {
-    return { status: 'failed' as const, errorName: value.errorName, errorMessage: value.errorMessage }
+    const model = value.model === null ? null : parseSessionModel(value.model)
+
+    return model === undefined
+      ? undefined
+      : { status: 'failed' as const, errorName: value.errorName, errorMessage: value.errorMessage, model }
   }
 
   return undefined
@@ -424,7 +435,11 @@ export function parsePiWorkerResult(result: BoundedProcessResult) {
       `Pi development worker failed: ${response.errorName}: ${response.errorMessage}`,
       true,
       'pi_worker_failed',
-      { workerErrorName: response.errorName, workerErrorMessage: response.errorMessage }
+      {
+        workerErrorName: response.errorName,
+        workerErrorMessage: response.errorMessage,
+        ...(response.model === null ? {} : { workerModel: response.model })
+      }
     )
   }
 
@@ -444,7 +459,7 @@ export function parsePiWorkerResult(result: BoundedProcessResult) {
     throw makeProcessError('Pi development worker returned an empty summary', true, 'pi_worker_empty_summary')
   }
 
-  return { summary: response.summary.slice(0, MAX_SUMMARY_CHARS) }
+  return { summary: response.summary.slice(0, MAX_SUMMARY_CHARS), model: response.model }
 }
 
 export async function runPiWorker(
@@ -458,6 +473,7 @@ export async function runPiWorker(
     input: JSON.stringify({
       agentDir: input.agentDir,
       devRoot: input.devRoot,
+      model: input.model,
       stateDir: input.stateDir,
       task: input.task,
       taskKey: input.taskKey,

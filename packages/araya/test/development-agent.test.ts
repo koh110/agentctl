@@ -9,6 +9,7 @@ import { createAgentSession, ModelRuntime } from '@earendil-works/pi-coding-agen
 import type { CreateAgentSessionOptions } from '@earendil-works/pi-coding-agent'
 
 import { DEVELOPMENT_TOOL_NAMES, findAssistantFailure, hasUsableModel, runDevelopmentAgent } from '../src/development-agent.ts'
+import type { DevelopmentModel, SessionModel } from '../src/development-model.ts'
 import { computeTaskKey, createTaskState, readTaskState } from '../src/development-worktrees.ts'
 
 type Fixture = Awaited<ReturnType<typeof createFixture>>
@@ -40,7 +41,11 @@ async function createFixture() {
   return { root, devRoot, agentDir, stateDir, taskKey, env }
 }
 
-function createInput(fixture: Fixture, overrides: { signal?: AbortSignal } = {}) {
+function createInput(fixture: Fixture, overrides: {
+  signal?: AbortSignal
+  model?: DevelopmentModel | null
+  onSessionModel?: (model: SessionModel) => void
+} = {}) {
   return {
     title: '入力検証を追加する',
     task: '空の値を拒否する。',
@@ -48,8 +53,31 @@ function createInput(fixture: Fixture, overrides: { signal?: AbortSignal } = {})
     stateDir: fixture.stateDir,
     taskKey: fixture.taskKey,
     agentDir: fixture.agentDir,
+    model: null,
     env: fixture.env,
     ...overrides
+  }
+}
+
+// 本物の認証情報を使わないように、dummy の key だけを置く
+async function writeDummyAuth(fixture: Fixture) {
+  await fs.writeFile(
+    path.join(fixture.agentDir, 'auth.json'),
+    JSON.stringify({ openai: { type: 'api_key', key: 'dummy-test-key' } }),
+    'utf8'
+  )
+}
+
+async function writePiSettings(fixture: Fixture, settings: Record<string, unknown>) {
+  await fs.writeFile(path.join(fixture.agentDir, 'settings.json'), JSON.stringify(settings), 'utf8')
+}
+
+function isModelUnavailable(message: string) {
+  return (error: unknown) => {
+    assert.ok(error instanceof Error)
+    assert.equal(error.name, 'ModelUnavailableError')
+    assert.equal(error.message, message)
+    return true
   }
 }
 
@@ -69,6 +97,8 @@ async function createRepository(fixture: Fixture, name: string) {
 
 function createSessionStub(toolNames: readonly string[], options: {
   hasModel?: boolean
+  model?: { provider: string; id: string }
+  thinkingLevel?: SessionModel['thinkingLevel']
   summary?: string
   modelError?: string
   onPrompt?: (prompt: string) => Promise<void>
@@ -77,6 +107,8 @@ function createSessionStub(toolNames: readonly string[], options: {
   const calls = { prompts, aborts: 0, disposed: false }
   const session = {
     hasModel: options.hasModel ?? true,
+    model: options.model ?? { provider: 'openai', id: 'gpt-5.5' },
+    thinkingLevel: options.thinkingLevel ?? 'medium',
     activeToolNames: () => {
       return [...toolNames]
     },
@@ -435,6 +467,212 @@ test('development agent: auth.json の model を network なしで選べる', as
       }
     }), /no configured Pi model/u)
     assert.deepEqual(selected, { provider: 'openai', usable: true })
+  } finally {
+    await fs.rm(fixture.root, { recursive: true, force: true })
+  }
+})
+
+test('development agent: 指定した model が Pi の model 一覧に無ければ、session を作らずに ModelUnavailableError で失敗する', async () => {
+  const fixture = await createFixture()
+  await writeDummyAuth(fixture)
+  const reported: SessionModel[] = []
+  let created = false
+
+  try {
+    await assert.rejects(runDevelopmentAgent(createInput(fixture, {
+      model: { provider: 'openai', id: 'gpt-araya-missing', thinkingLevel: 'high' },
+      onSessionModel: (model) => {
+        reported.push(model)
+      }
+    }), {
+      createSession: async () => {
+        created = true
+        return createSessionStub(DEVELOPMENT_TOOL_NAMES).session
+      }
+    }), isModelUnavailable('configured model openai/gpt-araya-missing is not in the Pi model list'))
+    assert.equal(created, false)
+    assert.deepEqual(reported, [])
+  } finally {
+    await fs.rm(fixture.root, { recursive: true, force: true })
+  }
+})
+
+test('development agent: 指定した model に Pi の認証が無ければ、session を作らずに ModelUnavailableError で失敗する', async () => {
+  const fixture = await createFixture()
+  await writeDummyAuth(fixture)
+  // 環境変数の API key に左右されないように、認証を持たない provider を models.json で定義する
+  await fs.writeFile(path.join(fixture.agentDir, 'models.json'), JSON.stringify({
+    providers: {
+      'araya-test-local': {
+        baseUrl: 'http://127.0.0.1:9/v1',
+        api: 'openai-completions',
+        models: [{ id: 'no-auth-model' }]
+      }
+    }
+  }), 'utf8')
+  let created = false
+
+  try {
+    await assert.rejects(runDevelopmentAgent(createInput(fixture, {
+      model: { provider: 'araya-test-local', id: 'no-auth-model', thinkingLevel: null }
+    }), {
+      createSession: async () => {
+        created = true
+        return createSessionStub(DEVELOPMENT_TOOL_NAMES).session
+      }
+    }), isModelUnavailable('configured model araya-test-local/no-auth-model has no Pi authentication'))
+    assert.equal(created, false)
+  } finally {
+    await fs.rm(fixture.root, { recursive: true, force: true })
+  }
+})
+
+test('development agent: 指定した model と thinking level を Pi session に渡し、Pi の既定 model より優先する', async () => {
+  const fixture = await createFixture()
+  await writeDummyAuth(fixture)
+  await writePiSettings(fixture, { defaultProvider: 'openai', defaultModel: 'gpt-4o', defaultThinkingLevel: 'low' })
+  const reported: SessionModel[] = []
+  const passed = { model: '', thinkingLevel: '' }
+  const stub = createSessionStub(DEVELOPMENT_TOOL_NAMES)
+
+  try {
+    const result = await runDevelopmentAgent(createInput(fixture, {
+      model: { provider: 'openai', id: 'gpt-5.5', thinkingLevel: 'high' },
+      onSessionModel: (model) => {
+        reported.push(model)
+      }
+    }), {
+      createSession: async (options) => {
+        passed.model = `${options.model?.provider ?? ''}/${options.model?.id ?? ''}`
+        passed.thinkingLevel = options.thinkingLevel ?? ''
+        const { session } = await createAgentSession(options)
+        const model = session.model === undefined ? undefined : { provider: session.model.provider, id: session.model.id }
+        const thinkingLevel = session.thinkingLevel
+        session.dispose()
+
+        // 実モデルを呼ばないように、実際の session の model と thinking level を持つ stub を返す
+        return {
+          ...stub.session,
+          hasModel: hasUsableModel(model, options.modelRuntime),
+          ...(model === undefined ? {} : { model }),
+          thinkingLevel
+        }
+      }
+    })
+
+    assert.deepEqual(passed, { model: 'openai/gpt-5.5', thinkingLevel: 'high' })
+    assert.deepEqual(result.model, { provider: 'openai', id: 'gpt-5.5', thinkingLevel: 'high' })
+    assert.deepEqual(reported, [{ provider: 'openai', id: 'gpt-5.5', thinkingLevel: 'high' }])
+    assert.equal(stub.calls.prompts.length, 1)
+  } finally {
+    await fs.rm(fixture.root, { recursive: true, force: true })
+  }
+})
+
+test('development agent: thinkingLevel を省略すると Pi の設定の thinking level を使い、丸めた後の値を返す', async () => {
+  const fixture = await createFixture()
+  await writeDummyAuth(fixture)
+  await writePiSettings(fixture, { defaultThinkingLevel: 'low', modelThinkingLevels: { 'openai/gpt-5.5': 'xhigh' } })
+  const samples = [
+    { model: { provider: 'openai', id: 'gpt-5.5', thinkingLevel: null }, expected: 'xhigh' },
+    { model: { provider: 'openai', id: 'gpt-5.4', thinkingLevel: null }, expected: 'low' },
+    // reasoning に対応しない model では Pi が off に丸める
+    { model: { provider: 'openai', id: 'gpt-4o', thinkingLevel: 'high' as const }, expected: 'off' }
+  ]
+
+  try {
+    for (const sample of samples) {
+      const stub = createSessionStub(DEVELOPMENT_TOOL_NAMES)
+      let passedThinkingLevel: string | undefined
+      const result = await runDevelopmentAgent(createInput(fixture, { model: sample.model }), {
+        createSession: async (options) => {
+          passedThinkingLevel = options.thinkingLevel
+          const { session } = await createAgentSession(options)
+          const model = session.model === undefined ? undefined : { provider: session.model.provider, id: session.model.id }
+          const thinkingLevel = session.thinkingLevel
+          session.dispose()
+
+          return { ...stub.session, ...(model === undefined ? {} : { model }), thinkingLevel }
+        }
+      })
+
+      assert.equal(passedThinkingLevel, sample.model.thinkingLevel ?? undefined, sample.model.id)
+      assert.deepEqual(result.model, { provider: 'openai', id: sample.model.id, thinkingLevel: sample.expected }, sample.model.id)
+    }
+  } finally {
+    await fs.rm(fixture.root, { recursive: true, force: true })
+  }
+})
+
+test('development agent: session の model が指定と違えば、prompt を送らずに ModelUnavailableError で失敗する', async () => {
+  const fixture = await createFixture()
+  await writeDummyAuth(fixture)
+  const reported: SessionModel[] = []
+  const stub = createSessionStub(DEVELOPMENT_TOOL_NAMES, { model: { provider: 'openai', id: 'gpt-4o' } })
+
+  try {
+    await assert.rejects(runDevelopmentAgent(createInput(fixture, {
+      model: { provider: 'openai', id: 'gpt-5.5', thinkingLevel: null },
+      onSessionModel: (model) => {
+        reported.push(model)
+      }
+    }), {
+      createSession: async () => {
+        return stub.session
+      }
+    }), isModelUnavailable('Pi session model openai/gpt-4o does not match the configured model openai/gpt-5.5'))
+    assert.equal(stub.calls.prompts.length, 0)
+    assert.equal(stub.calls.disposed, true)
+    assert.deepEqual(reported, [])
+  } finally {
+    await fs.rm(fixture.root, { recursive: true, force: true })
+  }
+})
+
+test('development agent: model を指定しなければ Pi の設定で選んだ model を返し、model が決まった後の失敗でも model を知らせる', async () => {
+  const fixture = await createFixture()
+  const sessionModel = { provider: 'anthropic', id: 'claude-fable-5-1' }
+
+  try {
+    const reported: SessionModel[] = []
+    const completed = await runDevelopmentAgent(createInput(fixture, {
+      onSessionModel: (model) => {
+        reported.push(model)
+      }
+    }), {
+      createSession: async (options) => {
+        assert.equal(options.model, undefined)
+        assert.equal(options.thinkingLevel, undefined)
+        return createSessionStub(DEVELOPMENT_TOOL_NAMES, { model: sessionModel, thinkingLevel: 'minimal' }).session
+      }
+    })
+
+    assert.deepEqual(completed.model, { ...sessionModel, thinkingLevel: 'minimal' })
+    assert.deepEqual(reported, [{ ...sessionModel, thinkingLevel: 'minimal' }])
+
+    const failed: SessionModel[] = []
+    await assert.rejects(runDevelopmentAgent(createInput(fixture, {
+      onSessionModel: (model) => {
+        failed.push(model)
+      }
+    }), {
+      createSession: async () => {
+        return createSessionStub([...DEVELOPMENT_TOOL_NAMES, 'powershell'], { model: sessionModel }).session
+      }
+    }), /tool set does not match/u)
+    assert.deepEqual(failed, [{ ...sessionModel, thinkingLevel: 'medium' }])
+
+    const noModel: SessionModel[] = []
+    await assert.rejects(runDevelopmentAgent(createInput(fixture, {
+      onSessionModel: (model) => {
+        noModel.push(model)
+      }
+    }), {
+      createSession: async () => {
+        return createSessionStub(DEVELOPMENT_TOOL_NAMES, { hasModel: false }).session
+      }
+    }), /no configured Pi model/u)
+    assert.deepEqual(noModel, [])
   } finally {
     await fs.rm(fixture.root, { recursive: true, force: true })
   }
