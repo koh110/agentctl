@@ -69,10 +69,6 @@ function autoObservationId(parsed: Record<string, unknown>): string {
   return `auto:${hash.slice(0, 24)}`
 }
 
-function isStringArray(value: unknown): value is string[] {
-  return Array.isArray(value) && value.every((item) => typeof item === 'string')
-}
-
 function validateObservation(parsed: unknown): Observation {
   if (!isJsonObject(parsed)) {
     throw new Error('JSON object expected')
@@ -99,31 +95,23 @@ function validateObservation(parsed: unknown): Observation {
       throw new Error('development kind requires workspace risk')
     }
 
+    const unknownPayloadKeys = Object.keys(payload).filter((key) => {
+      return key !== 'task'
+    })
+
+    if (unknownPayloadKeys.length > 0) {
+      throw new Error(
+        `development payload accepts only task; unsupported key(s): ${unknownPayloadKeys.join(', ')} ` +
+        '(verifyCommand was removed: the agent registers verification commands per repository)'
+      )
+    }
+
     if (typeof payload.task !== 'string' || payload.task.trim() === '') {
       throw new Error('development task payload.task is required')
     }
 
     if (payload.task.length > 20_000 || payload.task.includes('\0')) {
       throw new Error('development task must be at most 20000 characters and contain no NUL byte')
-    }
-
-    const verifyCommand = payload.verifyCommand
-
-    if (
-      !isStringArray(verifyCommand) ||
-      verifyCommand.length === 0 ||
-      verifyCommand.length > 64 ||
-      verifyCommand.some((value) =>
-        value.trim() === '' || value.length > 4096 || value.includes('\0')
-      )
-    ) {
-      throw new Error('development payload.verifyCommand must be a non-empty argv array of at most 64 strings')
-    }
-
-    const verifyCommandSize = verifyCommand.reduce((total, value) => total + value.length, 0)
-
-    if (verifyCommandSize > 32_768) {
-      throw new Error('development payload.verifyCommand must be at most 32768 characters total')
     }
   } else if (risk === 'workspace') {
     throw new Error('workspace risk requires development kind')

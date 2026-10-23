@@ -1,747 +1,977 @@
 import assert from 'node:assert/strict'
-import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import { createServer } from 'node:net'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-import { fileURLToPath, pathToFileURL } from 'node:url'
 
-import { openControlPlane } from '../src/control-plane.ts'
-import { createDevelopmentExecutor, runSandboxedVerification } from '../src/development.ts'
-import { createWorkspaceFileOperations, createWorkspaceTools } from '../src/development-tools.ts'
-import { runSandboxedPiAgent } from '../src/development-sandbox.ts'
+import type { Opportunity } from '../src/control-plane.ts'
+import { createDevelopmentExecutor } from '../src/development.ts'
+import type { PiWorkerInput, VerificationCommandInput, VerificationCommandResult } from '../src/development-process.ts'
+import { computeTaskKey, createWorktreeService } from '../src/development-worktrees.ts'
 
-async function makeTempDir() {
-  return fs.mkdtemp(path.join(os.tmpdir(), 'araya-development-test-'))
-}
+const OPPORTUNITY_ID = 'development:executor-test'
+const TASK_KEY = computeTaskKey(OPPORTUNITY_ID)
+const PASS_COMMAND = [process.execPath, '-e', "console.log('verified')"]
+const FAIL_COMMAND = [process.execPath, '-e', "console.error('broken'); process.exit(1)"]
 
-function runGit(cwd: string, ...args: string[]) {
-  execFileSync('git', args, { cwd, stdio: 'ignore' })
-}
+type Fixture = Awaited<ReturnType<typeof createFixture>>
 
-function isStringArray(value: unknown): value is string[] {
-  return Array.isArray(value) && value.every((item) => typeof item === 'string')
-}
-
-function readChangedFiles(evidence: Record<string, unknown>) {
-  if (!isStringArray(evidence.changedFiles)) {
-    throw new Error('changedFiles evidence is not a string array')
+async function createFixture() {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'araya-development-test-')))
+  const home = path.join(root, 'home')
+  const gitConfig = path.join(home, 'gitconfig')
+  const devRoot = path.join(root, 'dev')
+  const dataDir = path.join(root, 'data')
+  await fs.mkdir(home)
+  await fs.mkdir(devRoot)
+  await fs.writeFile(gitConfig, '', 'utf8')
+  const env = {
+    PATH: process.env.PATH,
+    HOME: home,
+    XDG_CONFIG_HOME: path.join(home, '.config'),
+    GIT_CONFIG_GLOBAL: gitConfig,
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_AUTHOR_NAME: 'Araya Test',
+    GIT_AUTHOR_EMAIL: 'araya-test@example.invalid',
+    GIT_COMMITTER_NAME: 'Araya Test',
+    GIT_COMMITTER_EMAIL: 'araya-test@example.invalid'
   }
 
-  return evidence.changedFiles
+  return { root, devRoot, dataDir, env }
 }
 
-function readVerifyExitCode(evidence: Record<string, unknown>) {
-  const verify = evidence.verify
-
-  if (typeof verify !== 'object' || verify === null || !('exitCode' in verify) || typeof verify.exitCode !== 'number') {
-    throw new Error('verify evidence has no numeric exitCode')
-  }
-
-  return verify.exitCode
+async function removeFixture(fixture: Fixture) {
+  await fs.rm(fixture.root, { recursive: true, force: true })
 }
 
-async function createGitRepository(root: string) {
-  const projectDir = path.join(root, 'source')
-  await fs.mkdir(projectDir, { recursive: true })
-  runGit(projectDir, 'init', '-b', 'main')
-  runGit(projectDir, 'config', 'user.name', 'Araya Test')
-  runGit(projectDir, 'config', 'user.email', 'araya-test@example.invalid')
-  await fs.writeFile(path.join(projectDir, 'README.md'), '# fixture\n', 'utf8')
-  runGit(projectDir, 'add', '--all')
-  runGit(projectDir, 'commit', '-m', 'initial fixture')
-
-  return projectDir
+function git(fixture: Fixture, cwd: string, ...args: string[]) {
+  return execFileSync('git', args, {
+    cwd,
+    env: fixture.env,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe']
+  }).trim()
 }
 
-function createDevelopmentOpportunity(controlPlanePath: string) {
-  const controlPlane = openControlPlane(controlPlanePath)
-  controlPlane.ensureGoal('goal:development-test', 'development task', 1000, 1)
-  controlPlane.recordObservationBatch([{
-    observationId: 'development:task-test',
+async function createRepository(fixture: Fixture, name: string) {
+  const repositoryPath = path.join(fixture.devRoot, name)
+  await fs.mkdir(repositoryPath)
+  git(fixture, repositoryPath, 'init', '-q', '-b', 'main')
+  await fs.writeFile(path.join(repositoryPath, 'README.md'), '# fixture\n', 'utf8')
+  git(fixture, repositoryPath, 'add', '--all')
+  git(fixture, repositoryPath, 'commit', '-q', '-m', 'initial fixture')
+
+  return repositoryPath
+}
+
+function createOpportunity(payload: Record<string, unknown> = { task: 'README を更新する' }, overrides: Partial<Opportunity> = {}) {
+  const opportunity: Opportunity = {
+    id: OPPORTUNITY_ID,
+    observationId: OPPORTUNITY_ID,
+    title: '開発課題',
     kind: 'development',
-    title: 'Add a fixture file',
     risk: 'workspace',
-    payload: { task: 'Create src/feature.ts', verifyCommand: ['node', '--version'] }
-  }], 'goal:development-test', 2)
-  const opportunity = controlPlane.getOpportunity('development:task-test')
-
-  if (opportunity === undefined) {
-    controlPlane.close()
-    throw new Error('development opportunity was not recorded')
+    status: 'scouting',
+    payload,
+    attemptCount: 0,
+    discoveredAt: 1,
+    updatedAt: 1,
+    ...overrides
   }
 
-  return { controlPlane, opportunity }
+  return opportunity
 }
 
-test('development executor creates a dedicated worktree and preserves uncommitted diff evidence', async () => {
-  const root = await makeTempDir()
-  const projectDir = await createGitRepository(root)
-  const baseHead = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: projectDir, encoding: 'utf8' }).trim()
-  const worktreeDir = path.join(root, 'worktrees')
-  const { controlPlane, opportunity } = createDevelopmentOpportunity(path.join(root, 'control-plane.sqlite'))
-  const agentCalls: string[] = []
+function createExecutor(
+  fixture: Fixture,
+  runAgent: (input: PiWorkerInput) => Promise<{ summary: string }>,
+  options: {
+    devRoot?: string
+    verificationTimeoutMs?: number
+    runVerification?: (input: VerificationCommandInput) => Promise<VerificationCommandResult>
+    gitExecutable?: string
+  } = {}
+) {
+  return createDevelopmentExecutor({
+    devRoot: options.devRoot ?? fixture.devRoot,
+    dataDir: fixture.dataDir,
+    env: fixture.env,
+    agentDir: path.join(fixture.root, 'pi-agent'),
+    taskTimeoutMs: 5000,
+    verificationTimeoutMs: options.verificationTimeoutMs ?? 10_000
+  }, {
+    runAgent,
+    ...(options.runVerification === undefined ? {} : { runVerification: options.runVerification }),
+    ...(options.gitExecutable === undefined ? {} : { gitExecutable: options.gitExecutable })
+  })
+}
+
+function serviceFor(input: PiWorkerInput) {
+  return createWorktreeService({
+    devRoot: input.devRoot,
+    stateDir: input.stateDir,
+    taskKey: input.taskKey,
+    env: input.env
+  })
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function readRecords(value: unknown, name: string) {
+  if (!Array.isArray(value)) {
+    throw new Error(`${name} is not an array`)
+  }
+
+  const records: Record<string, unknown>[] = []
+
+  for (const item of value) {
+    if (!isRecord(item)) {
+      throw new Error(`${name} contains a non-object`)
+    }
+
+    records.push(item)
+  }
+
+  return records
+}
+
+function readWorktrees(evidence: Record<string, unknown>) {
+  return readRecords(evidence.worktrees, 'worktrees')
+}
+
+function findWorktree(evidence: Record<string, unknown>, repository: string) {
+  const worktree = readWorktrees(evidence).find((candidate) => {
+    return candidate.repository === repository
+  })
+
+  if (worktree === undefined) {
+    throw new Error(`no evidence for ${repository}`)
+  }
+
+  return worktree
+}
+
+function readVerifications(worktree: Record<string, unknown>) {
+  return readRecords(worktree.verifications, 'verifications')
+}
+
+function worktreePathOf(repositoryPath: string) {
+  return path.join(repositoryPath, '.worktree', `araya-${TASK_KEY}`)
+}
+
+async function exists(target: string) {
+  try {
+    await fs.lstat(target)
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function assertWorktreeKept(fixture: Fixture, repositoryPath: string) {
+  assert.equal(git(fixture, repositoryPath, 'rev-parse', '--verify', '--quiet', `refs/heads/araya/${TASK_KEY}`).length > 0, true)
+  assert.equal(git(fixture, repositoryPath, 'worktree', 'list', '--porcelain').includes(worktreePathOf(repositoryPath)), true)
+}
+
+// worktree を作り、README を書き換えて、検証を登録する偽の agent の手順
+async function changeRepository(input: PiWorkerInput, repository: string, options: { command?: string[]; cwd?: string } = {}) {
+  const service = serviceFor(input)
+  const record = await service.createWorktree({ repository })
+  await fs.appendFile(path.join(record.worktreePath, 'README.md'), `${repository} changed\n`, 'utf8')
+
+  if (options.command !== undefined) {
+    await service.registerVerification({
+      repository,
+      command: options.command,
+      ...(options.cwd === undefined ? {} : { cwd: options.cwd })
+    })
+  }
+
+  return record
+}
+
+test('executor: 2つの repository にまたがる課題が completed になり、差分と検証結果を残す', async () => {
+  const fixture = await createFixture()
+  const repoA = await createRepository(fixture, 'repo-a')
+  const repoB = await createRepository(fixture, 'repo-b')
+  const baseA = git(fixture, repoA, 'rev-parse', 'HEAD')
+  const agentInputs: PiWorkerInput[] = []
 
   try {
-    const execute = createDevelopmentExecutor({
-      projectDir,
-      worktreeDir,
-      taskTimeoutMs: 5000,
-      verificationTimeoutMs: 5000
-    }, {
-      runAgent: async ({ cwd, task }) => {
-        agentCalls.push(task)
-        await fs.writeFile(path.join(cwd, 'README.md'), '# fixture revised\n', 'utf8')
-        await fs.mkdir(path.join(cwd, 'src'), { recursive: true })
-        await fs.writeFile(path.join(cwd, 'src', 'feature.ts'), 'export const value = 1\n', 'utf8')
-
-        return { summary: 'Created the feature file.' }
-      },
-      runVerification: async ({ command }) => ({
-        command: [...command],
-        exitCode: 0,
-        stdout: 'verification passed',
-        stderr: ''
+    const execute = createExecutor(fixture, async (input) => {
+      agentInputs.push(input)
+      const service = serviceFor(input)
+      const a = await service.createWorktree({ repository: 'repo-a' })
+      const b = await service.createWorktree({ repository: 'repo-b', base: 'main' })
+      await fs.writeFile(path.join(a.worktreePath, 'README.md'), '# fixture revised\n', 'utf8')
+      await fs.mkdir(path.join(b.worktreePath, 'sub'))
+      await fs.writeFile(path.join(b.worktreePath, 'sub', 'feature.txt'), 'feature\n', 'utf8')
+      await service.registerVerification({
+        repository: 'repo-a',
+        command: [process.execPath, '-e', "process.exit(require('node:fs').readFileSync('README.md', 'utf8').includes('revised') ? 0 : 1)"]
       })
-    })
+      await service.registerVerification({
+        repository: 'repo-b',
+        command: [process.execPath, '-e', "console.log(require('node:fs').readFileSync('feature.txt', 'utf8').trim())"],
+        cwd: 'sub'
+      })
 
-    const result = await execute(opportunity)
+      return { summary: 'repo-a と repo-b を変更しました。' }
+    })
+    const result = await execute(createOpportunity())
 
     assert.equal(result.status, 'completed')
-    assert.equal(agentCalls.length, 1)
-    assert.deepEqual(agentCalls, ['Create src/feature.ts'])
-    assert.equal(result.evidence.baseSha, baseHead)
-    assert.equal(readChangedFiles(result.evidence).includes('src/feature.ts'), true)
-    assert.equal(readChangedFiles(result.evidence).includes('README.md'), true)
-    assert.match(String(result.evidence.diff), /export const value = 1/u)
-    assert.deepEqual(result.evidence.diffStat, { files: 2, insertions: 2, deletions: 1, truncated: false })
-    assert.equal(readVerifyExitCode(result.evidence), 0)
-    assert.equal(execFileSync('git', ['rev-parse', 'HEAD'], { cwd: projectDir, encoding: 'utf8' }).trim(), baseHead)
-    assert.equal(execFileSync('git', ['status', '--porcelain'], { cwd: projectDir, encoding: 'utf8' }).trim(), '')
-    assert.equal(execFileSync('git', ['rev-parse', 'HEAD'], {
-      cwd: String(result.evidence.worktreePath),
-      encoding: 'utf8'
-    }).trim(), baseHead)
-    assert.equal(await fs.readFile(path.join(String(result.evidence.worktreePath), 'src', 'feature.ts'), 'utf8'), 'export const value = 1\n')
+    assert.equal(result.evidence.outcome, 'completed')
+    assert.equal(result.evidence.taskKey, TASK_KEY)
+    assert.equal(result.evidence.devRoot, fixture.devRoot)
+    assert.equal(result.evidence.summary, 'repo-a と repo-b を変更しました。')
+    assert.equal('failureReason' in result.evidence, false)
+    assert.deepEqual(agentInputs.map((input) => {
+      return { ...input, env: undefined }
+    }), [{
+      devRoot: fixture.devRoot,
+      stateDir: path.join(fixture.dataDir, 'development', TASK_KEY),
+      taskKey: TASK_KEY,
+      agentDir: path.join(fixture.root, 'pi-agent'),
+      title: '開発課題',
+      task: 'README を更新する',
+      timeoutMs: 5000,
+      env: undefined
+    }])
+    assert.equal(agentInputs[0]?.env, fixture.env)
+
+    const a = findWorktree(result.evidence, 'repo-a')
+    assert.equal(a.worktreePath, worktreePathOf(repoA))
+    assert.equal(a.branch, `araya/${TASK_KEY}`)
+    assert.equal(a.base, 'HEAD')
+    assert.equal(a.baseSha, baseA)
+    assert.equal(a.headSha, baseA)
+    assert.equal(a.headMoved, false)
+    assert.equal(a.excludeAdded, true)
+    assert.deepEqual(a.changedFiles, ['README.md'])
+    assert.deepEqual(a.diffStat, { files: 1, insertions: 1, deletions: 1, truncated: false })
+    assert.match(String(a.diff), /\+# fixture revised/u)
+    assert.equal(a.diffTruncated, false)
+    assert.deepEqual(readVerifications(a).map(({ status, exitCode, cwd }) => {
+      return { status, exitCode, cwd }
+    }), [{ status: 'passed', exitCode: 0, cwd: '' }])
+
+    const b = findWorktree(result.evidence, 'repo-b')
+    assert.equal(b.base, 'main')
+    assert.deepEqual(b.changedFiles, ['sub/feature.txt'])
+    assert.match(String(b.diff), /\+feature/u)
+    const [verificationB] = readVerifications(b)
+    assert.equal(verificationB?.status, 'passed')
+    assert.equal(verificationB?.cwd, 'sub')
+    assert.equal(verificationB?.stdout, 'feature\n')
+    assert.equal(verificationB?.stderr, '')
+    assert.equal(verificationB?.signal, null)
+
+    // main checkout は変わらない
+    assert.equal(git(fixture, repoA, 'status', '--porcelain'), '')
+    assert.equal(await fs.readFile(path.join(repoA, 'README.md'), 'utf8'), '# fixture\n')
+    await assertWorktreeKept(fixture, repoA)
+    await assertWorktreeKept(fixture, repoB)
   } finally {
-    controlPlane.close()
-    await fs.rm(root, { recursive: true, force: true })
+    await removeFixture(fixture)
   }
 })
 
-test('development executor does not collect evidence from a pre-existing worktree path', async () => {
-  const root = await makeTempDir()
-  const projectDir = await createGitRepository(root)
-  const worktreeDir = path.join(root, 'worktrees')
-  const { controlPlane, opportunity } = createDevelopmentOpportunity(path.join(root, 'control-plane.sqlite'))
-  const suffix = createHash('sha256').update(opportunity.id).digest('hex').slice(0, 20)
-  const branch = `araya/development-${suffix}`
-  const worktreePath = path.join(worktreeDir, `development-${suffix}`)
-  await fs.mkdir(worktreeDir, { mode: 0o700 })
+test('executor: 差分が無ければ no_changes で、検証は not_run', async () => {
+  const fixture = await createFixture()
+  const repoA = await createRepository(fixture, 'repo-a')
+  const marker = path.join(fixture.root, 'verification-ran')
 
   try {
-    runGit(projectDir, 'worktree', 'add', '-b', branch, worktreePath, 'HEAD')
-    await fs.writeFile(path.join(worktreePath, 'README.md'), '# stale unrelated worktree\n', 'utf8')
-    let agentCalled = false
-    const execute = createDevelopmentExecutor({ projectDir, worktreeDir }, {
-      runAgent: async () => {
-        agentCalled = true
-        return { summary: 'unexpected' }
-      }
-    })
-
-    const result = await execute(opportunity)
-
-    assert.equal(result.status, 'failed')
-    assert.equal(result.evidence.error, 'worktree_path_already_exists')
-    assert.deepEqual(result.evidence.verify, {
-      command: ['node', '--version'],
-      status: 'not_run',
-      reason: 'execution_failed_before_verification'
-    })
-    assert.equal(agentCalled, false)
-    assert.equal('changedFiles' in result.evidence, false)
-    assert.equal('diff' in result.evidence, false)
-    assert.equal('diffStat' in result.evidence, false)
-    assert.equal(await fs.readFile(path.join(worktreePath, 'README.md'), 'utf8'), '# stale unrelated worktree\n')
-    assert.equal(await fs.readFile(path.join(projectDir, 'README.md'), 'utf8'), '# fixture\n')
-    assert.equal(execFileSync('git', ['status', '--porcelain'], { cwd: projectDir, encoding: 'utf8' }).trim(), '')
-  } finally {
-    controlPlane.close()
-    await fs.rm(root, { recursive: true, force: true })
-  }
-})
-
-test('development executor fails a no-op agent response even when verification passes', async () => {
-  const root = await makeTempDir()
-  const projectDir = await createGitRepository(root)
-  const { controlPlane, opportunity } = createDevelopmentOpportunity(path.join(root, 'control-plane.sqlite'))
-
-  try {
-    const execute = createDevelopmentExecutor({
-      projectDir,
-      worktreeDir: path.join(root, 'worktrees')
-    }, {
-      runAgent: async () => ({ summary: 'No files changed.' }),
-      runVerification: async ({ command }) => ({
-        command: [...command],
-        exitCode: 0,
-        stdout: 'verification passed',
-        stderr: ''
+    const execute = createExecutor(fixture, async (input) => {
+      const service = serviceFor(input)
+      await service.createWorktree({ repository: 'repo-a' })
+      await service.registerVerification({
+        repository: 'repo-a',
+        command: [process.execPath, '-e', "require('node:fs').writeFileSync(process.argv[1], '')", marker]
       })
-    })
 
-    const result = await execute(opportunity)
+      return { summary: '変更はありません。' }
+    })
+    const result = await execute(createOpportunity())
 
     assert.equal(result.status, 'failed')
-    assert.deepEqual(readChangedFiles(result.evidence), [])
-    assert.equal(readVerifyExitCode(result.evidence), 0)
-    assert.equal(typeof result.evidence.worktreePath, 'string')
+    assert.equal(result.evidence.failureReason, 'no_changes')
+    assert.equal(result.evidence.summary, '変更はありません。')
+    const worktree = findWorktree(result.evidence, 'repo-a')
+    assert.deepEqual(worktree.changedFiles, [])
+    assert.deepEqual(readVerifications(worktree).map(({ status, reason }) => {
+      return { status, reason }
+    }), [{ status: 'not_run', reason: 'no_changes' }])
+    assert.equal(await exists(marker), false)
+    await assertWorktreeKept(fixture, repoA)
   } finally {
-    controlPlane.close()
-    await fs.rm(root, { recursive: true, force: true })
+    await removeFixture(fixture)
   }
 })
 
-test('development executor records a not-run verification command when the agent fails', async () => {
-  const root = await makeTempDir()
-  const projectDir = await createGitRepository(root)
-  const { controlPlane, opportunity } = createDevelopmentOpportunity(path.join(root, 'control-plane.sqlite'))
-  let verificationCalled = false
+test('executor: worktree を作らなかった課題は no_changes', async () => {
+  const fixture = await createFixture()
 
   try {
-    const execute = createDevelopmentExecutor({
-      projectDir,
-      worktreeDir: path.join(root, 'worktrees')
-    }, {
-      runAgent: async () => {
-        throw new Error('provider_unavailable')
-      },
-      runVerification: async ({ command }) => {
-        verificationCalled = true
-        return { command: [...command], exitCode: 0, stdout: '', stderr: '' }
-      }
-    })
-
-    const result = await execute(opportunity)
+    const result = await createExecutor(fixture, async () => {
+      return { summary: '何もしませんでした。' }
+    })(createOpportunity())
 
     assert.equal(result.status, 'failed')
-    assert.equal(verificationCalled, false)
-    assert.deepEqual(result.evidence.verify, {
-      command: ['node', '--version'],
-      status: 'not_run',
-      reason: 'agent_failed'
-    })
+    assert.equal(result.evidence.failureReason, 'no_changes')
+    assert.deepEqual(result.evidence.worktrees, [])
   } finally {
-    controlPlane.close()
-    await fs.rm(root, { recursive: true, force: true })
+    await removeFixture(fixture)
   }
 })
 
-test('development executor keeps evidence untouched when process termination is unconfirmed', async () => {
-  const root = await makeTempDir()
-  const projectDir = await createGitRepository(root)
-  const { controlPlane, opportunity } = createDevelopmentOpportunity(path.join(root, 'control-plane.sqlite'))
-  let verificationCalled = false
+test('executor: 検証の無い worktree があれば verification_missing だが、ほかの検証は実行する', async () => {
+  const fixture = await createFixture()
+  const repoA = await createRepository(fixture, 'repo-a')
+  const repoB = await createRepository(fixture, 'repo-b')
 
   try {
-    const execute = createDevelopmentExecutor({
-      projectDir,
-      worktreeDir: path.join(root, 'worktrees')
-    }, {
-      runAgent: async () => {
-        throw Object.assign(new Error('termination unconfirmed'), { terminationConfirmed: false })
-      },
-      runVerification: async ({ command }) => {
-        verificationCalled = true
-        return { command: [...command], exitCode: 0, stdout: '', stderr: '' }
-      }
-    })
-
-    const result = await execute(opportunity)
+    const result = await createExecutor(fixture, async (input) => {
+      await changeRepository(input, 'repo-a', { command: PASS_COMMAND })
+      await changeRepository(input, 'repo-b')
+      return { summary: '変更しました。' }
+    })(createOpportunity())
 
     assert.equal(result.status, 'failed')
-    assert.equal(verificationCalled, false)
+    assert.equal(result.evidence.failureReason, 'verification_missing')
+    assert.deepEqual(readVerifications(findWorktree(result.evidence, 'repo-a')).map(({ status, stdout }) => {
+      return { status, stdout }
+    }), [{ status: 'passed', stdout: 'verified\n' }])
+    assert.deepEqual(findWorktree(result.evidence, 'repo-b').verifications, [])
+    await assertWorktreeKept(fixture, repoA)
+    await assertWorktreeKept(fixture, repoB)
+  } finally {
+    await removeFixture(fixture)
+  }
+})
+
+test('executor: exit 1 の検証は verification_failed', async () => {
+  const fixture = await createFixture()
+  const repoA = await createRepository(fixture, 'repo-a')
+
+  try {
+    const result = await createExecutor(fixture, async (input) => {
+      const service = serviceFor(input)
+      await changeRepository(input, 'repo-a', { command: FAIL_COMMAND })
+      await service.registerVerification({ repository: 'repo-a', command: PASS_COMMAND })
+      return { summary: '変更しました。' }
+    })(createOpportunity())
+
+    assert.equal(result.status, 'failed')
+    assert.equal(result.evidence.failureReason, 'verification_failed')
+    assert.deepEqual(readVerifications(findWorktree(result.evidence, 'repo-a')).map(({ status, exitCode, stderr }) => {
+      return { status, exitCode, stderr }
+    }), [
+      { status: 'failed', exitCode: 1, stderr: 'broken\n' },
+      { status: 'passed', exitCode: 0, stderr: '' }
+    ])
+    await assertWorktreeKept(fixture, repoA)
+  } finally {
+    await removeFixture(fixture)
+  }
+})
+
+test('executor: timeout した検証は verification_failed', async () => {
+  const fixture = await createFixture()
+  const repoA = await createRepository(fixture, 'repo-a')
+
+  try {
+    const result = await createExecutor(fixture, async (input) => {
+      await changeRepository(input, 'repo-a', { command: [process.execPath, '-e', 'setInterval(() => {}, 1000)'] })
+      return { summary: '変更しました。' }
+    }, { verificationTimeoutMs: 1000 })(createOpportunity())
+
+    assert.equal(result.status, 'failed')
+    assert.equal(result.evidence.failureReason, 'verification_failed')
+    assert.equal(readVerifications(findWorktree(result.evidence, 'repo-a'))[0]?.status, 'timeout')
+    await assertWorktreeKept(fixture, repoA)
+  } finally {
+    await removeFixture(fixture)
+  }
+})
+
+test('executor: cwd が無い検証は失敗として扱う', async () => {
+  const fixture = await createFixture()
+  await createRepository(fixture, 'repo-a')
+
+  try {
+    const result = await createExecutor(fixture, async (input) => {
+      await changeRepository(input, 'repo-a', { command: PASS_COMMAND, cwd: 'missing/dir' })
+      return { summary: '変更しました。' }
+    })(createOpportunity())
+
+    assert.equal(result.status, 'failed')
+    assert.equal(result.evidence.failureReason, 'verification_failed')
+    assert.deepEqual(readVerifications(findWorktree(result.evidence, 'repo-a')).map(({ status, reason, cwd }) => {
+      return { status, reason, cwd }
+    }), [{ status: 'failed', reason: 'cwd_missing', cwd: 'missing/dir' }])
+  } finally {
+    await removeFixture(fixture)
+  }
+})
+
+test('executor: agent の失敗では差分を集め、検証は not_run にする', async () => {
+  const fixture = await createFixture()
+  const repoA = await createRepository(fixture, 'repo-a')
+  const marker = path.join(fixture.root, 'verification-ran')
+
+  try {
+    const result = await createExecutor(fixture, async (input) => {
+      await changeRepository(input, 'repo-a', {
+        command: [process.execPath, '-e', "require('node:fs').writeFileSync(process.argv[1], '')", marker]
+      })
+      throw Object.assign(new Error('Pi development worker failed'), {
+        code: 'pi_worker_failed',
+        terminationConfirmed: true,
+        workerErrorName: 'Error',
+        workerErrorMessage: 'model request failed'
+      })
+    })(createOpportunity())
+
+    assert.equal(result.status, 'failed')
+    assert.equal(result.evidence.failureReason, 'agent_failed')
+    assert.equal(result.evidence.agentError, 'pi_worker_failed')
+    assert.equal(result.evidence.workerErrorName, 'Error')
+    assert.equal(result.evidence.workerErrorMessage, 'model request failed')
+    assert.equal('summary' in result.evidence, false)
+    const worktree = findWorktree(result.evidence, 'repo-a')
+    assert.deepEqual(worktree.changedFiles, ['README.md'])
+    assert.match(String(worktree.diff), /\+repo-a changed/u)
+    assert.deepEqual(readVerifications(worktree).map(({ status, reason }) => {
+      return { status, reason }
+    }), [{ status: 'not_run', reason: 'agent_failed' }])
+    assert.equal(await exists(marker), false)
+    await assertWorktreeKept(fixture, repoA)
+  } finally {
+    await removeFixture(fixture)
+  }
+})
+
+test('executor: agent の timeout は agent_timeout で、差分は残す', async () => {
+  const fixture = await createFixture()
+  const repoA = await createRepository(fixture, 'repo-a')
+
+  try {
+    const result = await createExecutor(fixture, async (input) => {
+      await changeRepository(input, 'repo-a', { command: PASS_COMMAND })
+      throw Object.assign(new Error('Pi worker timed out'), { code: 'agent_timeout', terminationConfirmed: true })
+    })(createOpportunity())
+
+    assert.equal(result.status, 'failed')
+    assert.equal(result.evidence.failureReason, 'agent_timeout')
+    assert.equal(result.evidence.agentError, 'agent_timeout')
+    const worktree = findWorktree(result.evidence, 'repo-a')
+    assert.deepEqual(worktree.changedFiles, ['README.md'])
+    assert.deepEqual(readVerifications(worktree).map(({ status, reason }) => {
+      return { status, reason }
+    }), [{ status: 'not_run', reason: 'agent_timeout' }])
+    await assertWorktreeKept(fixture, repoA)
+  } finally {
+    await removeFixture(fixture)
+  }
+})
+
+test('executor: worker の終了を確認できなければ差分も検証も扱わない', async () => {
+  const fixture = await createFixture()
+  const repoA = await createRepository(fixture, 'repo-a')
+  const verificationCalls: VerificationCommandInput[] = []
+
+  try {
+    const result = await createExecutor(fixture, async (input) => {
+      await changeRepository(input, 'repo-a', { command: PASS_COMMAND })
+      throw Object.assign(new Error('Pi worker process termination could not be confirmed'), {
+        code: 'termination_unconfirmed',
+        terminationConfirmed: false
+      })
+    }, {
+      runVerification: async (input) => {
+        verificationCalls.push(input)
+        return runPassed()
+      }
+    })(createOpportunity())
+
+    assert.equal(result.status, 'failed')
+    assert.equal(result.evidence.failureReason, 'termination_unconfirmed')
     assert.equal(result.evidence.terminationConfirmed, false)
-    assert.deepEqual(result.evidence.verify, {
-      command: ['node', '--version'],
-      status: 'not_run',
-      reason: 'agent_termination_unconfirmed'
-    })
-    assert.equal('changedFiles' in result.evidence, false)
-    assert.equal('diff' in result.evidence, false)
-    assert.equal('diffStat' in result.evidence, false)
+    assert.deepEqual(result.evidence.worktrees, [])
+    assert.equal(verificationCalls.length, 0)
+    await assertWorktreeKept(fixture, repoA)
   } finally {
-    controlPlane.close()
-    await fs.rm(root, { recursive: true, force: true })
+    await removeFixture(fixture)
   }
 })
 
-test('development executor refuses a dirty source repository before creating a worktree', async () => {
-  const root = await makeTempDir()
-  const projectDir = await createGitRepository(root)
-  const worktreeDir = path.join(root, 'worktrees')
-  const { controlPlane, opportunity } = createDevelopmentOpportunity(path.join(root, 'control-plane.sqlite'))
+test('executor: 状態 directory が既にあれば agent を動かさない', async () => {
+  const fixture = await createFixture()
+  const stateDir = path.join(fixture.dataDir, 'development', TASK_KEY)
+  await fs.mkdir(stateDir, { recursive: true })
   let agentCalled = false
 
   try {
-    await fs.writeFile(path.join(projectDir, 'uncommitted.txt'), 'preserve me\n', 'utf8')
-    const execute = createDevelopmentExecutor({ projectDir, worktreeDir }, {
-      runAgent: async () => {
+    const result = await createExecutor(fixture, async () => {
+      agentCalled = true
+      return { summary: 'unexpected' }
+    })(createOpportunity())
+
+    assert.equal(result.status, 'failed')
+    assert.equal(result.evidence.failureReason, 'task_state_already_exists')
+    assert.equal(agentCalled, false)
+  } finally {
+    await removeFixture(fixture)
+  }
+})
+
+test('executor: 不正な課題は invalid_task で、状態 directory も作らない', async () => {
+  const fixture = await createFixture()
+  let agentCalled = false
+  const cases = [
+    createOpportunity({ task: 'README を更新する', verifyCommand: ['npm', 'test'] }),
+    createOpportunity({ task: '   ' }),
+    createOpportunity({ task: 'a\0b' }),
+    createOpportunity({ task: 'x'.repeat(20_001) }),
+    createOpportunity({}),
+    createOpportunity({ task: 'README を更新する' }, { kind: 'investigate' }),
+    createOpportunity({ task: 'README を更新する' }, { risk: 'external' })
+  ]
+
+  try {
+    const execute = createExecutor(fixture, async () => {
+      agentCalled = true
+      return { summary: 'unexpected' }
+    })
+
+    for (const opportunity of cases) {
+      const result = await execute(opportunity)
+
+      assert.equal(result.status, 'failed')
+      assert.equal(result.evidence.failureReason, 'invalid_task')
+    }
+
+    assert.match(String((await execute(cases[0] ?? createOpportunity())).evidence.failureDetail), /verifyCommand/u)
+    assert.equal(agentCalled, false)
+    assert.equal(await exists(path.join(fixture.dataDir, 'development')), false)
+  } finally {
+    await removeFixture(fixture)
+  }
+})
+
+test('executor: 開発 root が directory でなければ dev_root_missing', async () => {
+  const fixture = await createFixture()
+  const file = path.join(fixture.root, 'not-a-directory')
+  await fs.writeFile(file, '', 'utf8')
+  let agentCalled = false
+
+  try {
+    for (const devRoot of [path.join(fixture.root, 'missing'), file]) {
+      const result = await createExecutor(fixture, async () => {
         agentCalled = true
         return { summary: 'unexpected' }
-      }
-    })
+      }, { devRoot })(createOpportunity())
 
-    const result = await execute(opportunity)
+      assert.equal(result.status, 'failed')
+      assert.equal(result.evidence.failureReason, 'dev_root_missing')
+    }
 
-    assert.equal(result.status, 'failed')
     assert.equal(agentCalled, false)
-    assert.equal(await fs.readdir(worktreeDir).catch((error: unknown) => {
-      if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
-        return []
-      }
-
-      throw error
-    }).then((entries) => entries.length), 0)
-    assert.equal(await fs.readFile(path.join(projectDir, 'uncommitted.txt'), 'utf8'), 'preserve me\n')
   } finally {
-    controlPlane.close()
-    await fs.rm(root, { recursive: true, force: true })
+    await removeFixture(fixture)
   }
 })
 
-test('development executor rejects a symlinked worktree parent before creating anything in the source repository', async () => {
-  const root = await makeTempDir()
-  const projectDir = await createGitRepository(root)
-  const projectAlias = path.join(root, 'project-alias')
-  const worktreeDir = path.join(projectAlias, 'worktrees')
-  const { controlPlane, opportunity } = createDevelopmentOpportunity(path.join(root, 'control-plane.sqlite'))
-  await fs.symlink(projectDir, projectAlias)
+test('executor: symlink の開発 root は解決先を使う', async () => {
+  const fixture = await createFixture()
+  await createRepository(fixture, 'repo-a')
+  const link = path.join(fixture.root, 'dev-link')
+  await fs.symlink(fixture.devRoot, link)
+  const devRoots: string[] = []
 
   try {
-    const execute = createDevelopmentExecutor({ projectDir, worktreeDir }, {
-      runAgent: async () => ({ summary: 'should not run' })
-    })
-    const result = await execute(opportunity)
+    const result = await createExecutor(fixture, async (input) => {
+      devRoots.push(input.devRoot)
+      await changeRepository(input, 'repo-a', { command: PASS_COMMAND })
+      return { summary: '変更しました。' }
+    }, { devRoot: link })(createOpportunity())
 
-    assert.equal(result.status, 'failed')
-    await assert.rejects(fs.lstat(path.join(projectDir, 'worktrees')), { code: 'ENOENT' })
-    assert.equal(execFileSync('git', ['status', '--porcelain'], { cwd: projectDir, encoding: 'utf8' }).trim(), '')
-  } finally {
-    controlPlane.close()
-    await fs.rm(root, { recursive: true, force: true })
-  }
-})
-
-function createCompletingExecutor(projectDir: string, worktreeDir: string, agentCalls: string[]) {
-  return createDevelopmentExecutor({ projectDir, worktreeDir }, {
-    runAgent: async ({ cwd, task }) => {
-      agentCalls.push(task)
-      await fs.writeFile(path.join(cwd, 'README.md'), '# fixture revised\n', 'utf8')
-
-      return { summary: 'Revised the fixture.' }
-    },
-    runVerification: async ({ command }) => {
-      return {
-        command: [...command],
-        exitCode: 0,
-        stdout: '',
-        stderr: ''
-      }
-    }
-  })
-}
-
-// umask 002の環境では、araya initが作るdata directoryが775になる。group書き込みは許可する。
-test('development executor accepts a group-writable parent of the worktree directory', async () => {
-  const root = await makeTempDir()
-  const projectDir = await createGitRepository(root)
-  const dataDir = path.join(root, 'data')
-  const worktreeDir = path.join(dataDir, 'worktrees')
-  const { controlPlane, opportunity } = createDevelopmentOpportunity(path.join(root, 'control-plane.sqlite'))
-  const agentCalls: string[] = []
-  await fs.mkdir(dataDir, { mode: 0o775 })
-  await fs.chmod(dataDir, 0o775)
-
-  try {
-    const result = await createCompletingExecutor(projectDir, worktreeDir, agentCalls)(opportunity)
-
-    assert.equal(result.evidence.error, undefined)
     assert.equal(result.status, 'completed')
-    assert.deepEqual(agentCalls, ['Create src/feature.ts'])
-    assert.equal(path.dirname(String(result.evidence.worktreePath)), await fs.realpath(worktreeDir))
+    assert.deepEqual(devRoots, [fixture.devRoot])
+    assert.equal(result.evidence.devRoot, fixture.devRoot)
   } finally {
-    controlPlane.close()
-    await fs.rm(root, { recursive: true, force: true })
+    await removeFixture(fixture)
   }
 })
 
-test('development executor refuses a world-writable parent of the worktree directory', async () => {
-  const root = await makeTempDir()
-  const projectDir = await createGitRepository(root)
-  const dataDir = path.join(root, 'data')
-  const worktreeDir = path.join(dataDir, 'worktrees')
-  const { controlPlane, opportunity } = createDevelopmentOpportunity(path.join(root, 'control-plane.sqlite'))
-  const agentCalls: string[] = []
-  await fs.mkdir(dataDir, { mode: 0o777 })
-  await fs.chmod(dataDir, 0o777)
+test('executor: 記録 file が壊れていれば task_state_invalid で、検証を実行しない', async () => {
+  const fixture = await createFixture()
+  const repoA = await createRepository(fixture, 'repo-a')
+  const verificationCalls: VerificationCommandInput[] = []
 
   try {
-    const result = await createCompletingExecutor(projectDir, worktreeDir, agentCalls)(opportunity)
-
-    assert.equal(result.status, 'failed')
-    assert.equal(result.evidence.error, 'worktree_root_parent_permissions_unsafe')
-    assert.deepEqual(agentCalls, [])
-    await assert.rejects(fs.lstat(worktreeDir), { code: 'ENOENT' })
-  } finally {
-    controlPlane.close()
-    await fs.rm(root, { recursive: true, force: true })
-  }
-})
-
-test('development executor accepts a worktree directory that group members can write', async () => {
-  const root = await makeTempDir()
-  const projectDir = await createGitRepository(root)
-  const worktreeDir = path.join(root, 'shared-worktrees')
-  const { controlPlane, opportunity } = createDevelopmentOpportunity(path.join(root, 'control-plane.sqlite'))
-  const agentCalls: string[] = []
-  await fs.mkdir(worktreeDir, { mode: 0o775 })
-  await fs.chmod(worktreeDir, 0o775)
-
-  try {
-    const result = await createCompletingExecutor(projectDir, worktreeDir, agentCalls)(opportunity)
-
-    assert.equal(result.evidence.error, undefined)
-    assert.equal(result.status, 'completed')
-    assert.deepEqual(agentCalls, ['Create src/feature.ts'])
-    assert.equal(path.dirname(String(result.evidence.worktreePath)), await fs.realpath(worktreeDir))
-  } finally {
-    controlPlane.close()
-    await fs.rm(root, { recursive: true, force: true })
-  }
-})
-
-test('development executor refuses a world-writable worktree directory', async () => {
-  const root = await makeTempDir()
-  const projectDir = await createGitRepository(root)
-  const worktreeDir = path.join(root, 'shared-worktrees')
-  const { controlPlane, opportunity } = createDevelopmentOpportunity(path.join(root, 'control-plane.sqlite'))
-  const agentCalls: string[] = []
-  await fs.mkdir(worktreeDir, { mode: 0o777 })
-  await fs.chmod(worktreeDir, 0o777)
-
-  try {
-    const result = await createCompletingExecutor(projectDir, worktreeDir, agentCalls)(opportunity)
-
-    assert.equal(result.status, 'failed')
-    assert.equal(result.evidence.error, 'worktree_root_permissions_unsafe')
-    assert.deepEqual(agentCalls, [])
-    assert.equal((await fs.readdir(worktreeDir)).length, 0)
-  } finally {
-    controlPlane.close()
-    await fs.rm(root, { recursive: true, force: true })
-  }
-})
-
-test('development executor retains the worktree and diff when verification fails', async () => {
-  const root = await makeTempDir()
-  const projectDir = await createGitRepository(root)
-  const { controlPlane, opportunity } = createDevelopmentOpportunity(path.join(root, 'control-plane.sqlite'))
-
-  try {
-    const execute = createDevelopmentExecutor({
-      projectDir,
-      worktreeDir: path.join(root, 'worktrees')
+    const result = await createExecutor(fixture, async (input) => {
+      await changeRepository(input, 'repo-a', { command: PASS_COMMAND })
+      await fs.appendFile(path.join(input.stateDir, 'worktrees.jsonl'), '{broken\n', 'utf8')
+      return { summary: '変更しました。' }
     }, {
-      runAgent: async ({ cwd }) => {
-        await fs.writeFile(path.join(cwd, 'attempt.txt'), 'review me\n', 'utf8')
-        return { summary: 'Attempted the change.' }
-      },
-      runVerification: async ({ command }) => ({
-        command: [...command],
-        exitCode: 1,
-        stdout: 'test failed',
-        stderr: ''
-      })
-    })
-
-    const result = await execute(opportunity)
+      runVerification: async (input) => {
+        verificationCalls.push(input)
+        return runPassed()
+      }
+    })(createOpportunity())
 
     assert.equal(result.status, 'failed')
-    assert.equal(readVerifyExitCode(result.evidence), 1)
-    assert.equal(readChangedFiles(result.evidence).includes('attempt.txt'), true)
-    assert.equal(await fs.readFile(path.join(String(result.evidence.worktreePath), 'attempt.txt'), 'utf8'), 'review me\n')
+    assert.equal(result.evidence.failureReason, 'task_state_invalid')
+    assert.equal(result.evidence.summary, '変更しました。')
+    assert.match(String(result.evidence.failureDetail), /worktrees\.jsonl line 2/u)
+    assert.deepEqual(result.evidence.worktrees, [])
+    assert.equal(verificationCalls.length, 0)
+    await assertWorktreeKept(fixture, repoA)
   } finally {
-    controlPlane.close()
-    await fs.rm(root, { recursive: true, force: true })
+    await removeFixture(fixture)
   }
 })
 
-test('workspace file operations reject traversal, sensitive paths, symlink escapes, and hardlinks', async () => {
-  const root = await makeTempDir()
-  const workspace = path.join(root, 'workspace')
-  const outside = path.join(root, 'outside.txt')
-  await fs.mkdir(workspace)
-  await fs.writeFile(outside, 'keep secret', 'utf8')
-  await fs.writeFile(path.join(workspace, 'safe.txt'), 'safe content', 'utf8')
-  await fs.symlink(outside, path.join(workspace, 'escape.txt'))
-  await fs.link(outside, path.join(workspace, 'hardlink.txt'))
-  const operations = await createWorkspaceFileOperations(workspace)
+test('executor: worktree が消えていれば evidence_collection_failed', async () => {
+  const fixture = await createFixture()
+  const repoA = await createRepository(fixture, 'repo-a')
+  const verificationCalls: VerificationCommandInput[] = []
 
   try {
-    assert.equal(await operations.readTextFile('safe.txt'), 'safe content')
-    await assert.rejects(operations.readTextFile('../outside.txt'), /cannot contain \.\./u)
-    await assert.rejects(operations.writeFile('missing/../safe.txt', 'changed'), /cannot contain \.\./u)
-    await assert.rejects(operations.writeFile(path.join(root, 'outside.txt'), 'changed'), /outside the development workspace/u)
-    await assert.rejects(operations.readTextFile('escape.txt'), /symbolic link/u)
-    await assert.rejects(operations.writeFile('hardlink.txt', 'changed'), /hard link/u)
-    await assert.rejects(operations.readFile('.git/config'), /reserved path/u)
-    await assert.rejects(operations.writeFile('.env', 'TOKEN=hidden'), /sensitive path/u)
-    assert.equal(await fs.readFile(path.join(workspace, 'safe.txt'), 'utf8'), 'safe content')
-    assert.equal(await fs.readFile(outside, 'utf8'), 'keep secret')
+    const result = await createExecutor(fixture, async (input) => {
+      const record = await changeRepository(input, 'repo-a', { command: PASS_COMMAND })
+      await fs.rm(record.worktreePath, { recursive: true, force: true })
+      return { summary: '変更しました。' }
+    }, {
+      runVerification: async (input) => {
+        verificationCalls.push(input)
+        return runPassed()
+      }
+    })(createOpportunity())
+
+    assert.equal(result.status, 'failed')
+    assert.equal(result.evidence.failureReason, 'evidence_collection_failed')
+    assert.deepEqual(readWorktrees(result.evidence).map(({ repository, worktreePath }) => {
+      return { repository, worktreePath }
+    }), [{ repository: 'repo-a', worktreePath: worktreePathOf(repoA) }])
+    assert.equal(verificationCalls.length, 0)
+    assert.equal(git(fixture, repoA, 'rev-parse', '--verify', '--quiet', `refs/heads/araya/${TASK_KEY}`).length > 0, true)
   } finally {
-    await fs.rm(root, { recursive: true, force: true })
+    await removeFixture(fixture)
   }
 })
 
-function invokeWorkspaceTool(
-  tool: Awaited<ReturnType<typeof createWorkspaceTools>>[number],
-  params: object
-) {
-  return Reflect.apply(tool.execute, tool, ['workspace-path-test', params, undefined, undefined, undefined])
+function runPassed() {
+  const result: VerificationCommandResult = {
+    status: 'passed',
+    exitCode: 0,
+    signal: null,
+    stdout: '',
+    stderr: '',
+    stdoutBytes: 0,
+    stderrBytes: 0,
+    terminationConfirmed: true
+  }
+
+  return result
 }
 
-test('Pi workspace tools reject literal parent path components before SDK normalization', async () => {
-  const root = await makeTempDir()
-  const workspace = path.join(root, 'workspace')
-  await fs.mkdir(workspace)
-  await fs.writeFile(path.join(workspace, 'safe.txt'), 'safe content\n', 'utf8')
+test('executor: worktree の path が symlink で別の場所を指していれば task_state_invalid で、差分も検証も扱わない', async () => {
+  const fixture = await createFixture()
+  await createRepository(fixture, 'repo-a')
+  // 開発 root の外にある別の repository
+  const outside = path.join(fixture.root, 'outside')
+  await fs.mkdir(outside)
+  git(fixture, outside, 'init', '-q', '-b', 'main')
+  await fs.writeFile(path.join(outside, 'README.md'), '# outside\n', 'utf8')
+  git(fixture, outside, 'add', '--all')
+  git(fixture, outside, 'commit', '-q', '-m', 'outside fixture')
+  const verificationCalls: VerificationCommandInput[] = []
 
   try {
-    const [read, write, edit, ls, find, grep] = await createWorkspaceTools(workspace)
-    const calls = [
-      { tool: read, params: { path: 'missing/../safe.txt' } },
-      { tool: write, params: { path: 'missing/../safe.txt', content: 'changed' } },
-      { tool: edit, params: { path: 'missing/../safe.txt', edits: [{ oldText: 'safe', newText: 'changed' }] } },
-      { tool: ls, params: { path: 'missing/..' } },
-      { tool: find, params: { path: 'missing/..', pattern: '**/*' } },
-      { tool: grep, params: { path: 'missing/../safe.txt', pattern: 'safe', literal: true } }
-    ]
+    const result = await createExecutor(fixture, async (input) => {
+      const record = await changeRepository(input, 'repo-a', { command: PASS_COMMAND })
+      await fs.rm(record.worktreePath, { recursive: true, force: true })
+      await fs.symlink(outside, record.worktreePath)
+      return { summary: '変更しました。' }
+    }, {
+      runVerification: async (input) => {
+        verificationCalls.push(input)
+        return runPassed()
+      }
+    })(createOpportunity())
 
-    for (const call of calls) {
-      await assert.rejects(
-        invokeWorkspaceTool(call.tool, call.params),
-        /workspace path cannot contain \.\./u
-      )
+    assert.equal(result.status, 'failed')
+    assert.equal(result.evidence.failureReason, 'task_state_invalid')
+    assert.match(String(result.evidence.failureDetail), /symlinks/u)
+    assert.deepEqual(result.evidence.worktrees, [])
+    assert.equal(verificationCalls.length, 0)
+  } finally {
+    await removeFixture(fixture)
+  }
+})
+
+test('executor: 記録した path が壊れた symlink や symlink の下にあれば task_state_invalid で、差分も検証も扱わない', async () => {
+  const cases = [
+    {
+      name: 'worktree が壊れた symlink',
+      tamper: async (worktreePath: string, fixture: Fixture) => {
+        await fs.rm(worktreePath, { recursive: true, force: true })
+        await fs.symlink(path.join(fixture.root, 'missing-target'), worktreePath)
+      }
+    },
+    {
+      name: '.worktree が別の場所への symlink',
+      tamper: async (worktreePath: string, fixture: Fixture) => {
+        const empty = path.join(fixture.root, 'empty')
+        await fs.mkdir(empty)
+        await fs.rm(path.dirname(worktreePath), { recursive: true, force: true })
+        await fs.symlink(empty, path.dirname(worktreePath))
+      }
+    }
+  ]
+
+  for (const { name, tamper } of cases) {
+    const fixture = await createFixture()
+    await createRepository(fixture, 'repo-a')
+    const verificationCalls: VerificationCommandInput[] = []
+
+    try {
+      const result = await createExecutor(fixture, async (input) => {
+        const record = await changeRepository(input, 'repo-a', { command: PASS_COMMAND })
+        await tamper(record.worktreePath, fixture)
+        return { summary: '変更しました。' }
+      }, {
+        runVerification: async (input) => {
+          verificationCalls.push(input)
+          return runPassed()
+        }
+      })(createOpportunity())
+
+      assert.equal(result.status, 'failed', name)
+      assert.equal(result.evidence.failureReason, 'task_state_invalid', name)
+      assert.match(String(result.evidence.failureDetail), /is not a real directory/u, name)
+      assert.deepEqual(result.evidence.worktrees, [], name)
+      assert.equal(verificationCalls.length, 0, name)
+    } finally {
+      await removeFixture(fixture)
+    }
+  }
+})
+
+test('executor: 差分の収集に使う git の終了を確認できなければ evidence_collection_failed', async () => {
+  const fixture = await createFixture()
+  await createRepository(fixture, 'repo-a')
+  const holderPidFile = path.join(fixture.root, 'holder.pid')
+  const fakeGitScript = path.join(fixture.root, 'fake-git.cjs')
+  const fakeGit = path.join(fixture.root, 'fake-git')
+  const realGit = execFileSync('sh', ['-c', 'command -v git'], { env: fixture.env, encoding: 'utf8' }).trim()
+  // 差分の本体を出す git diff（--binary）だけ、別 session の子 process に stdout を開いたまま残させ、親が kill されても pipe が閉じないようにする
+  await fs.writeFile(fakeGitScript, [
+    "const { spawn, spawnSync } = require('node:child_process')",
+    "const fs = require('node:fs')",
+    'const args = process.argv.slice(2)',
+    "if (!args.includes('--binary')) {",
+    `  const result = spawnSync(${JSON.stringify(realGit)}, args, { stdio: 'inherit' })`,
+    '  process.exit(result.status ?? 1)',
+    '}',
+    "const holder = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { detached: true, stdio: ['ignore', 'inherit', 'ignore'] })",
+    `fs.writeFileSync(${JSON.stringify(holderPidFile)}, String(holder.pid))`,
+    'holder.unref()',
+    "process.stdout.write('x'.repeat(1024 * 1024))",
+    'setInterval(() => {}, 1000)'
+  ].join('\n'), 'utf8')
+  await fs.writeFile(fakeGit, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(fakeGitScript)} "$@"\n`, { encoding: 'utf8', mode: 0o755 })
+  const verificationCalls: VerificationCommandInput[] = []
+
+  try {
+    const result = await createExecutor(fixture, async (input) => {
+      await changeRepository(input, 'repo-a', { command: PASS_COMMAND })
+      return { summary: '変更しました。' }
+    }, {
+      gitExecutable: fakeGit,
+      runVerification: async (input) => {
+        verificationCalls.push(input)
+        return runPassed()
+      }
+    })(createOpportunity())
+
+    assert.equal(result.status, 'failed')
+    assert.equal(result.evidence.failureReason, 'evidence_collection_failed')
+    assert.match(String(result.evidence.failureDetail), /termination could not be confirmed/u)
+    assert.equal(verificationCalls.length, 0)
+  } finally {
+    const holderPid = Number(await fs.readFile(holderPidFile, 'utf8').catch(() => {
+      return ''
+    }))
+
+    if (Number.isInteger(holderPid) && holderPid > 0) {
+      try {
+        process.kill(holderPid, 'SIGKILL')
+      } catch {
+        // 既に終了している
+      }
     }
 
-    assert.equal(await fs.readFile(path.join(workspace, 'safe.txt'), 'utf8'), 'safe content\n')
-    assert.deepEqual(await fs.readdir(workspace), ['safe.txt'])
-  } finally {
-    await fs.rm(root, { recursive: true, force: true })
+    await removeFixture(fixture)
   }
 })
 
-test('sandboxed verification hides host files, secrets, and network behind an isolated HOME', async () => {
-  const root = await makeTempDir()
-  const projectDir = await createGitRepository(root)
-  const worktreePath = path.join(root, 'worktree')
-  const hostFile = path.join(root, 'outside.txt')
-  const server = createServer((socket) => socket.end('host service reached'))
-  await fs.mkdir(worktreePath)
-  await fs.writeFile(hostFile, 'preserve me', 'utf8')
-  await new Promise<void>((resolve, reject) => {
-    server.once('error', reject)
-    server.listen(0, '127.0.0.1', resolve)
-  })
-  const address = server.address()
-
-  if (address === null || typeof address === 'string') {
-    throw new Error('test listener did not receive a TCP address')
-  }
-
-  const probe = `void (async () => { const fs = require('node:fs'); const net = require('node:net'); const target = ${JSON.stringify(hostFile)}; let blocked = false; try { fs.writeFileSync(target, 'overwritten') } catch { blocked = true }; const reachable = await new Promise((resolve) => { const socket = net.connect({ host: '127.0.0.1', port: ${address.port} }); const timer = setTimeout(() => { socket.destroy(); resolve(false) }, 1000); socket.once('connect', () => { clearTimeout(timer); socket.destroy(); resolve(true) }); socket.once('error', () => { clearTimeout(timer); resolve(false) }) }); process.stdout.write(JSON.stringify({ cwd: process.cwd(), home: process.env.HOME, blocked, hostShadowVisible: fs.existsSync('/etc/shadow'), hostNetworkReachable: reachable })) })()`
+test('executor: 検証の cwd が symlink で worktree の外を指していれば、その検証は実行せず失敗にする', async () => {
+  const fixture = await createFixture()
+  await createRepository(fixture, 'repo-a')
+  const outside = path.join(fixture.root, 'outside-cwd')
+  await fs.mkdir(outside)
+  const verificationCalls: VerificationCommandInput[] = []
 
   try {
-    const result = await runSandboxedVerification(projectDir, worktreePath, ['node', '-e', probe], 10000)
+    const result = await createExecutor(fixture, async (input) => {
+      const record = await changeRepository(input, 'repo-a', { command: PASS_COMMAND, cwd: 'linked' })
+      await fs.symlink(outside, path.join(record.worktreePath, 'linked'))
+      return { summary: '変更しました。' }
+    }, {
+      runVerification: async (input) => {
+        verificationCalls.push(input)
+        return runPassed()
+      }
+    })(createOpportunity())
 
-    assert.equal(result.exitCode, 0)
-    assert.deepEqual(JSON.parse(result.stdout), {
-      cwd: '/workspace',
-      home: '/tmp/home',
-      blocked: true,
-      hostShadowVisible: false,
-      hostNetworkReachable: false
-    })
-    assert.equal(await fs.readFile(hostFile, 'utf8'), 'preserve me')
+    assert.equal(result.status, 'failed')
+    assert.equal(result.evidence.failureReason, 'verification_failed')
+    assert.deepEqual(readVerifications(findWorktree(result.evidence, 'repo-a')).map(({ status, reason }) => {
+      return { status, reason }
+    }), [{ status: 'failed', reason: 'cwd_outside_worktree' }])
+    assert.equal(verificationCalls.length, 0)
   } finally {
-    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
-    await fs.rm(root, { recursive: true, force: true })
+    await removeFixture(fixture)
   }
 })
 
-test('sandboxed verification hides a linked worktree git pointer after applying its temporary overlay', async () => {
-  const root = await makeTempDir()
-  const projectDir = await createGitRepository(root)
-  const worktreePath = path.join(root, 'worktree')
-  runGit(projectDir, 'remote', 'add', 'origin', 'https://user:DO_NOT_EXPOSE@example.invalid/repo.git')
-  runGit(projectDir, 'worktree', 'add', '-b', 'verification-metadata-test', worktreePath, 'HEAD')
-  const gitPointer = await fs.readFile(path.join(worktreePath, '.git'), 'utf8')
+test('executor: 検証の終了を確認できなければ残りの検証を実行しない', async () => {
+  const fixture = await createFixture()
+  await createRepository(fixture, 'repo-a')
+  await createRepository(fixture, 'repo-b')
+  const verificationCalls: string[] = []
 
   try {
-    assert.match(gitPointer, /^gitdir:/u)
-    const result = await runSandboxedVerification(
-      projectDir,
-      worktreePath,
-      ['node', '-e', "const fs = require('node:fs'); let visibility = 'visible'; try { fs.readFileSync('/workspace/.git', 'utf8') } catch (error) { visibility = ['EACCES', 'ENOENT', 'ENOTDIR'].includes(error.code) ? 'hidden' : 'unexpected-error' }; process.stdout.write(JSON.stringify({ visibility }))"],
-      10000
-    )
+    const result = await createExecutor(fixture, async (input) => {
+      const service = serviceFor(input)
+      await changeRepository(input, 'repo-a', { command: ['first'] })
+      await service.registerVerification({ repository: 'repo-a', command: ['second'] })
+      await changeRepository(input, 'repo-b', { command: ['third'] })
+      return { summary: '変更しました。' }
+    }, {
+      runVerification: async (input) => {
+        verificationCalls.push(input.command.join(' '))
+        return input.command[0] === 'first'
+          ? { ...runPassed(), status: 'timeout', exitCode: null, signal: 'SIGKILL', terminationConfirmed: false, reason: 'termination_unconfirmed' }
+          : runPassed()
+      }
+    })(createOpportunity())
 
-    assert.equal(result.exitCode, 0, JSON.stringify(result))
-    assert.deepEqual(JSON.parse(result.stdout), { visibility: 'hidden' })
+    assert.equal(result.status, 'failed')
+    assert.equal(result.evidence.failureReason, 'termination_unconfirmed')
+    assert.equal(result.evidence.terminationConfirmed, false)
+    assert.deepEqual(verificationCalls, ['first'])
+    assert.deepEqual(readVerifications(findWorktree(result.evidence, 'repo-a')).map(({ status, reason }) => {
+      return { status, reason }
+    }), [
+      { status: 'timeout', reason: 'termination_unconfirmed' },
+      { status: 'not_run', reason: 'previous_termination_unconfirmed' }
+    ])
+    assert.deepEqual(readVerifications(findWorktree(result.evidence, 'repo-b')).map(({ status, reason }) => {
+      return { status, reason }
+    }), [{ status: 'not_run', reason: 'previous_termination_unconfirmed' }])
   } finally {
-    await fs.rm(root, { recursive: true, force: true })
+    await removeFixture(fixture)
   }
 })
 
-test('sandboxed verification reads project dependencies read-only without creating worktree files', async () => {
-  const root = await makeTempDir()
-  const projectDir = await createGitRepository(root)
-  const worktreePath = path.join(root, 'worktree')
-  const dependencyDir = path.join(projectDir, 'node_modules', 'fixture-dependency')
-  await fs.mkdir(worktreePath)
-  await fs.mkdir(dependencyDir, { recursive: true })
-  await fs.writeFile(path.join(dependencyDir, 'value.txt'), 'dependency data', 'utf8')
-  const probe = `const fs = require('node:fs'); const dependency = '/workspace/node_modules/fixture-dependency/value.txt'; let blocked = false; try { fs.writeFileSync(dependency, 'modified') } catch { blocked = true }; fs.writeFileSync('/workspace/generated.txt', 'ephemeral'); process.stdout.write(JSON.stringify({ dependency: fs.readFileSync(dependency, 'utf8'), blocked }))`
+test('executor: agent が commit すると headMoved を記録し、commit 済みの差分も含める', async () => {
+  const fixture = await createFixture()
+  const repoA = await createRepository(fixture, 'repo-a')
+  const baseSha = git(fixture, repoA, 'rev-parse', 'HEAD')
 
   try {
-    const result = await runSandboxedVerification(projectDir, worktreePath, ['node', '-e', probe], 10000)
+    const result = await createExecutor(fixture, async (input) => {
+      const record = await changeRepository(input, 'repo-a', { command: PASS_COMMAND })
+      await fs.writeFile(path.join(record.worktreePath, 'committed.txt'), 'committed\n', 'utf8')
+      git(fixture, record.worktreePath, 'add', 'committed.txt')
+      git(fixture, record.worktreePath, 'commit', '-q', '-m', 'agent commit')
+      return { summary: '変更しました。' }
+    })(createOpportunity())
 
-    assert.equal(result.exitCode, 0, JSON.stringify(result))
-    assert.deepEqual(JSON.parse(result.stdout), { dependency: 'dependency data', blocked: true })
-    assert.equal(await fs.readFile(path.join(dependencyDir, 'value.txt'), 'utf8'), 'dependency data')
-    await assert.rejects(fs.lstat(path.join(worktreePath, 'node_modules')), { code: 'ENOENT' })
-    await assert.rejects(fs.lstat(path.join(worktreePath, 'generated.txt')), { code: 'ENOENT' })
+    assert.equal(result.status, 'completed')
+    const worktree = findWorktree(result.evidence, 'repo-a')
+    assert.equal(worktree.baseSha, baseSha)
+    assert.equal(worktree.headMoved, true)
+    assert.notEqual(worktree.headSha, baseSha)
+    assert.equal(worktree.headSha, git(fixture, worktreePathOf(repoA), 'rev-parse', 'HEAD'))
+    assert.deepEqual(worktree.changedFiles, ['README.md', 'committed.txt'])
+    assert.match(String(worktree.diff), /\+committed/u)
   } finally {
-    await fs.rm(root, { recursive: true, force: true })
+    await removeFixture(fixture)
   }
 })
 
-test('sandboxed verification rejects a dependency root symlink that points outside the project', async () => {
-  const root = await makeTempDir()
-  const projectDir = await createGitRepository(root)
-  const worktreePath = path.join(root, 'worktree')
-  const externalDependencies = path.join(root, 'external-dependencies')
-  await fs.mkdir(worktreePath)
-  await fs.mkdir(externalDependencies)
-  await fs.writeFile(path.join(externalDependencies, 'fixture.txt'), 'external dependency fixture', 'utf8')
-  await fs.symlink(externalDependencies, path.join(projectDir, 'node_modules'))
+test('executor: diff は全 worktree の合計で上限を超えると diffTruncated になる', async () => {
+  const fixture = await createFixture()
+  await createRepository(fixture, 'repo-a')
+  await createRepository(fixture, 'repo-b')
 
   try {
-    await assert.rejects(
-      runSandboxedVerification(
-        projectDir,
-        worktreePath,
-        ['node', '-e', "process.stdout.write(require('node:fs').readFileSync('/workspace/node_modules/fixture.txt', 'utf8'))"],
-        10000
-      ),
-      /project node_modules must be a real directory/u
-    )
+    const result = await createExecutor(fixture, async (input) => {
+      const a = await changeRepository(input, 'repo-a', { command: PASS_COMMAND })
+      await fs.writeFile(path.join(a.worktreePath, 'README.md'), `${'large line\n'.repeat(30_000)}`, 'utf8')
+      await changeRepository(input, 'repo-b', { command: PASS_COMMAND })
+      return { summary: '変更しました。' }
+    })(createOpportunity())
+
+    assert.equal(result.status, 'completed')
+    const a = findWorktree(result.evidence, 'repo-a')
+    const b = findWorktree(result.evidence, 'repo-b')
+    const totalBytes = Buffer.byteLength(String(a.diff)) + Buffer.byteLength(String(b.diff))
+
+    assert.equal(a.diffTruncated, true)
+    assert.equal(b.diffTruncated, true)
+    assert.deepEqual(b.changedFiles, ['README.md'])
+    assert.ok(totalBytes <= 256 * 1024)
+    assert.match(String(a.diff), /\[diff truncated: the evidence limit is 262144 bytes across all worktrees\]\n$/u)
+    // 上限を使い切った後の worktree は、印も入らないため diff を残さない
+    assert.equal(b.diff, '')
+    assert.equal(readVerifications(b)[0]?.status, 'passed')
   } finally {
-    await fs.rm(root, { recursive: true, force: true })
+    await removeFixture(fixture)
   }
 })
 
-test('sandboxed verification rejects dependency hardlinks that also name files outside the project', async () => {
-  const root = await makeTempDir()
-  const projectDir = await createGitRepository(root)
-  const worktreePath = path.join(root, 'worktree')
-  const dependencyDir = path.join(projectDir, 'node_modules')
-  const externalFile = path.join(root, 'external-credential-fixture')
-  await fs.mkdir(worktreePath)
-  await fs.mkdir(dependencyDir)
-  await fs.writeFile(externalFile, 'external dependency hardlink fixture', 'utf8')
-  await fs.link(externalFile, path.join(dependencyDir, 'linked-file'))
+test('executor: untracked の分で上限を超えても、切り詰めの印を含めて上限に収める', async () => {
+  const fixture = await createFixture()
+  await createRepository(fixture, 'repo-a')
 
   try {
-    await assert.rejects(
-      runSandboxedVerification(
-        projectDir,
-        worktreePath,
-        ['node', '-e', "process.stdout.write(require('node:fs').readFileSync('/workspace/node_modules/linked-file', 'utf8'))"],
-        10000
-      ),
-      /project dependency tree contains an external hardlink/u
-    )
+    const result = await createExecutor(fixture, async (input) => {
+      const a = await changeRepository(input, 'repo-a', { command: PASS_COMMAND })
+      // tracked の diff は上限の少し手前に収め、untracked の file で上限を超えさせる
+      await fs.writeFile(path.join(a.worktreePath, 'README.md'), `${'large line\n'.repeat(21_000)}`, 'utf8')
+      await fs.writeFile(path.join(a.worktreePath, 'extra.txt'), `${'extra line\n'.repeat(2000)}`, 'utf8')
+      return { summary: '変更しました。' }
+    })(createOpportunity())
+
+    assert.equal(result.status, 'completed')
+    const a = findWorktree(result.evidence, 'repo-a')
+
+    assert.deepEqual(a.changedFiles, ['README.md', 'extra.txt'])
+    assert.equal(a.diffTruncated, true)
+    assert.ok(Buffer.byteLength(String(a.diff)) <= 256 * 1024)
+    assert.match(String(a.diff), /\[diff truncated: the evidence limit is 262144 bytes across all worktrees\]\n$/u)
   } finally {
-    await fs.rm(root, { recursive: true, force: true })
-  }
-})
-
-test('sandboxed Pi worker rejects a dependency root symlink before reading host packages', async () => {
-  const root = await makeTempDir()
-  const projectRoot = path.join(root, 'project')
-  const packageRoot = path.join(projectRoot, 'packages', 'araya')
-  const sourceDirectory = path.join(packageRoot, 'src')
-  const binDirectory = path.join(packageRoot, 'bin')
-  const testDirectory = path.dirname(fileURLToPath(import.meta.url))
-  const hostNodeModules = path.resolve(testDirectory, '../../..', 'node_modules')
-  const workspacePath = path.join(root, 'worktree')
-  const agentDir = path.join(root, 'empty-pi-agent')
-  await fs.mkdir(sourceDirectory, { recursive: true })
-  await fs.mkdir(binDirectory, { recursive: true })
-  await fs.mkdir(workspacePath)
-  await fs.mkdir(agentDir)
-  await fs.writeFile(path.join(packageRoot, 'package.json'), JSON.stringify({ type: 'module' }), 'utf8')
-  await fs.writeFile(path.join(workspacePath, '.git'), 'gitdir: ../.git/worktrees/test\n', 'utf8')
-
-  for (const sourceName of ['development-sandbox.ts', 'development-agent.ts', 'development-tools.ts']) {
-    await fs.copyFile(
-      path.join(testDirectory, '../src', sourceName),
-      path.join(sourceDirectory, sourceName)
-    )
-  }
-
-  await fs.copyFile(
-    path.join(testDirectory, '../bin/development-worker.ts'),
-    path.join(binDirectory, 'development-worker.ts')
-  )
-  await fs.symlink(hostNodeModules, path.join(projectRoot, 'node_modules'), 'dir')
-  const sandboxModule = await import(pathToFileURL(path.join(sourceDirectory, 'development-sandbox.ts')).href)
-
-  try {
-    await assert.rejects(sandboxModule.runSandboxedPiAgent({
-      workspacePath,
-      agentDir,
-      title: 'Do not make a model request',
-      task: 'No model is configured in this isolated test.',
-      timeoutMs: 5000
-    }), /Pi SDK node_modules must be a real directory/u)
-  } finally {
-    await fs.rm(root, { recursive: true, force: true })
-  }
-})
-
-test('sandboxed Pi worker starts without exposing the host Pi configuration', async () => {
-  const root = await makeTempDir()
-  const projectDir = await createGitRepository(root)
-  const workspacePath = path.join(root, 'sandbox-worktree')
-  runGit(projectDir, 'worktree', 'add', '--detach', workspacePath, 'HEAD')
-  const agentDir = path.join(root, 'empty-pi-agent')
-  await fs.mkdir(agentDir)
-
-  try {
-    await assert.rejects(runSandboxedPiAgent({
-      workspacePath,
-      agentDir,
-      title: 'Do not make a model request',
-      task: 'No model is configured in this isolated test.',
-      timeoutMs: 10000
-    }), /Pi development worker failed/u)
-  } finally {
-    await fs.rm(root, { recursive: true, force: true })
+    await removeFixture(fixture)
   }
 })

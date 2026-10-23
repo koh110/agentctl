@@ -124,19 +124,32 @@ test('config: Pi agent directory is taken from the shared environment variable',
   assert.equal(config.piAgentDir, agentDir)
 })
 
-test('config: development project, worktree and timeout bounds are explicit', () => {
+test('config: 開発 root と timeout の範囲を設定から読む', () => {
   const config = loadConfig({
     ARAYA_DATA_DIR: '/tmp/araya-config-test',
-    ARAYA_PROJECT_DIR: '/workspace/project',
-    ARAYA_WORKTREE_DIR: '/scratch/worktrees',
+    ARAYA_DEV_ROOT: '/workspace/dev/../dev',
     ARAYA_DEVELOPMENT_TIMEOUT_MS: '7000000',
     ARAYA_VERIFICATION_TIMEOUT_MS: '500'
   })
 
-  assert.equal(config.projectDir, '/workspace/project')
-  assert.equal(config.worktreeDir, '/scratch/worktrees')
+  assert.equal(config.devRoot, '/workspace/dev')
+  assert.equal('projectDir' in config, false)
+  assert.equal('worktreeDir' in config, false)
   assert.equal(config.developmentTimeoutMs, 60 * 60 * 1000)
   assert.equal(config.verificationTimeoutMs, 1000)
+})
+
+test('config: 開発 root の既定は home の dev で、空文字は未指定として扱う', () => {
+  assert.equal(loadConfig({}).devRoot, path.join(os.homedir(), 'dev'))
+  assert.equal(loadConfig({ ARAYA_DEV_ROOT: '' }).devRoot, path.join(os.homedir(), 'dev'))
+})
+
+test('config: 子 process に引き継ぐ環境変数を copy として持つ', () => {
+  const env = { ARAYA_DATA_DIR: '/tmp/araya-config-test', PATH: '/usr/bin', CUSTOM_TOKEN_NAME: 'value' }
+  const config = loadConfig(env)
+
+  assert.deepEqual(config.env, env)
+  assert.notEqual(config.env, env)
 })
 
 test('config: retry制御は未実装のため maxAttempts を公開しない', () => {
@@ -184,6 +197,22 @@ test('CLI: --help は Pi SDK を起動しない', async () => {
   })
 
   assert.equal(piStarted, false)
+})
+
+test('CLI: help の環境変数一覧に ARAYA_DEV_ROOT がある', async () => {
+  const lines: string[] = []
+  const originalLog = console.log
+  console.log = (...values: unknown[]) => {
+    lines.push(values.map(String).join(' '))
+  }
+
+  try {
+    await runCli(['--help'], async () => {})
+  } finally {
+    console.log = originalLog
+  }
+
+  assert.match(lines.join('\n'), /^ {2}ARAYA_DEV_ROOT$/mu)
 })
 
 test('CLI: Pi SDK はグローバル pi コマンドなしで使える', async () => {
@@ -446,7 +475,7 @@ test('tick: workspace development taskを一度実行し、検証証拠を保存
       kind: 'development',
       title: '実装して検証する',
       risk: 'workspace',
-      payload: { task: 'fixture fileを作る', verifyCommand: ['node', '--version'] }
+      payload: { task: 'fixture fileを作る' }
     })}\n`,
     'utf8'
   )
@@ -459,11 +488,16 @@ test('tick: workspace development taskを一度実行し、検証証拠を保存
       return {
         status: 'completed',
         evidence: {
-          baseSha: 'a'.repeat(40),
-          worktreePath: '/tmp/araya-test-worktree',
-          branch: 'araya/development-test',
-          changedFiles: ['src/fixture.ts'],
-          verify: { command: ['node', '--version'], exitCode: 0 }
+          taskKey: 'development-00000000000000000000',
+          devRoot: '/tmp/araya-test-dev',
+          outcome: 'completed',
+          summary: 'fixture file を作りました。',
+          worktrees: [{
+            repository: 'fixture',
+            worktreePath: '/tmp/araya-test-dev/fixture/.worktree/araya-development-00000000000000000000',
+            changedFiles: ['src/fixture.ts'],
+            verifications: [{ command: ['node', '--version'], cwd: '', status: 'passed', exitCode: 0 }]
+          }]
         }
       }
     }
@@ -479,8 +513,15 @@ test('tick: workspace development taskを一度実行し、検証証拠を保存
     const opportunity = controlPlane.getOpportunity('development:integration')
     assert.equal(opportunity?.kind, 'development')
     assert.equal(opportunity?.status, 'completed')
-    assert.equal(opportunity?.evidence?.worktreePath, '/tmp/araya-test-worktree')
-    assert.deepEqual(opportunity?.evidence?.changedFiles, ['src/fixture.ts'])
+    assert.equal(opportunity?.evidence?.taskKey, 'development-00000000000000000000')
+    assert.equal(opportunity?.evidence?.outcome, 'completed')
+    assert.equal(opportunity?.evidence?.type, 'development_result')
+    assert.deepEqual(opportunity?.evidence?.worktrees, [{
+      repository: 'fixture',
+      worktreePath: '/tmp/araya-test-dev/fixture/.worktree/araya-development-00000000000000000000',
+      changedFiles: ['src/fixture.ts'],
+      verifications: [{ command: ['node', '--version'], cwd: '', status: 'passed', exitCode: 0 }]
+    }])
   } finally {
     controlPlane.close()
   }

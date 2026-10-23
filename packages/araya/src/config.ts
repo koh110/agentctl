@@ -28,9 +28,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
 
   return {
     dataDir,
+    devRoot: path.resolve(env.ARAYA_DEV_ROOT || path.join(os.homedir(), 'dev')),
     piAgentDir: env.PI_CODING_AGENT_DIR || undefined,
-    projectDir: path.resolve(env.ARAYA_PROJECT_DIR ?? process.cwd()),
-    worktreeDir: path.resolve(env.ARAYA_WORKTREE_DIR ?? path.join(dataDir, 'worktrees')),
     inboxDir: path.resolve(env.ARAYA_INBOX_DIR ?? path.join(dataDir, 'inbox')),
     statusFile: path.resolve(env.ARAYA_STATUS_FILE ?? path.join(dataDir, 'status.json')),
     controlPlanePath: path.resolve(env.ARAYA_CONTROL_PLANE_PATH ?? path.join(dataDir, 'araya.sqlite')),
@@ -44,6 +43,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     verificationTimeoutMs: numberFromEnv(env.ARAYA_VERIFICATION_TIMEOUT_MS, 5 * 60 * 1000, {
       minimum: 1000,
       maximum: 60 * 60 * 1000
-    })
+    }),
+    // 子 process（development worker、検証コマンド、git）に引き継ぐ環境変数
+    env: { ...env }
   }
 }

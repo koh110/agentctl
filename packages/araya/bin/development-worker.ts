@@ -1,11 +1,16 @@
+import path from 'node:path'
 import { TextDecoder } from 'node:util'
 
+import { loadConfig } from '../src/config.ts'
 import { runDevelopmentAgent } from '../src/development-agent.ts'
 
 const MAX_INPUT_BYTES = 64 * 1024
 const MAX_TASK_CHARS = 20_000
 const MAX_TITLE_CHARS = 1000
 const MAX_TIMEOUT_MS = 60 * 60 * 1000
+const MAX_ERROR_MESSAGE_CHARS = 500
+const INPUT_KEYS = 'agentDir,devRoot,stateDir,task,taskKey,timeoutMs,title'
+const TASK_KEY_PATTERN = /^development-[0-9a-f]{20}$/u
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -17,6 +22,20 @@ function safeErrorName(error: unknown) {
   }
 
   return error.name
+}
+
+function safeErrorMessage(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error)
+
+  return message.slice(0, MAX_ERROR_MESSAGE_CHARS)
+}
+
+function validateAbsolutePath(value: unknown, name: string) {
+  if (typeof value !== 'string' || value === '' || value.includes('\0') || !path.isAbsolute(value)) {
+    throw new Error(`worker ${name} must be an absolute path`)
+  }
+
+  return value
 }
 
 async function readInput() {
@@ -44,13 +63,18 @@ async function readInput() {
     throw new Error('worker input must be a JSON object')
   }
 
-  const keys = Object.keys(parsed).sort().join(',')
-
-  if (keys !== 'task,timeoutMs,title') {
-    throw new Error('worker input has unexpected fields')
+  if (Object.keys(parsed).sort().join(',') !== INPUT_KEYS) {
+    throw new Error(`worker input must have exactly these fields: ${INPUT_KEYS}`)
   }
 
-  const { task, timeoutMs, title } = parsed
+  const { task, taskKey, timeoutMs, title } = parsed
+  const agentDir = validateAbsolutePath(parsed.agentDir, 'agentDir')
+  const devRoot = validateAbsolutePath(parsed.devRoot, 'devRoot')
+  const stateDir = validateAbsolutePath(parsed.stateDir, 'stateDir')
+
+  if (typeof taskKey !== 'string' || !TASK_KEY_PATTERN.test(taskKey)) {
+    throw new Error('worker taskKey is invalid')
+  }
 
   if (
     typeof title !== 'string' ||
@@ -79,22 +103,50 @@ async function readInput() {
     throw new Error('worker timeout is invalid')
   }
 
-  return { title, task, timeoutMs }
+  return { agentDir, devRoot, stateDir, task, taskKey, title }
+}
+
+function finish(response: Record<string, unknown>, exitCode: number) {
+  process.stdout.write(`${JSON.stringify(response)}\n`, () => {
+    process.exit(exitCode)
+  })
 }
 
 async function main() {
-  const input = await readInput()
+  // timeout で Araya から SIGTERM が届いたら session を abort し、終了を待ってから失敗を返す
+  const controller = new AbortController()
 
-  console.log = () => undefined
-  console.info = () => undefined
-  console.warn = () => undefined
-  console.error = () => undefined
+  function abort() {
+    controller.abort()
+  }
 
-  const result = await runDevelopmentAgent(input)
-  process.stdout.write(`${JSON.stringify({ status: 'completed', summary: result.summary })}\n`)
+  process.on('SIGTERM', abort)
+  process.on('SIGINT', abort)
+
+  try {
+    const input = await readInput()
+
+    console.log = () => undefined
+    console.info = () => undefined
+    console.warn = () => undefined
+    console.error = () => undefined
+
+    const result = await runDevelopmentAgent({
+      ...input,
+      env: loadConfig().env,
+      signal: controller.signal
+    })
+
+    if (controller.signal.aborted) {
+      const error = new Error('development worker received a termination signal')
+      error.name = 'AbortError'
+      throw error
+    }
+
+    finish({ status: 'completed', summary: result.summary }, 0)
+  } catch (error) {
+    finish({ status: 'failed', errorName: safeErrorName(error), errorMessage: safeErrorMessage(error) }, 1)
+  }
 }
 
-main().catch((error: unknown) => {
-  process.stdout.write(`${JSON.stringify({ status: 'failed', errorName: safeErrorName(error) })}\n`)
-  process.exitCode = 1
-})
+void main()

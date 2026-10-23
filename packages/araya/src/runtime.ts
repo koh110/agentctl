@@ -45,12 +45,13 @@ export async function createArayaModelRuntime(agentDir?: string) {
 export async function openArayaRuntime(
   config: {
     controlPlanePath: string
+    dataDir: string
+    devRoot: string
+    env: Readonly<Record<string, string | undefined>>
     inboxDir: string
     piDurablePath: string
     intervalMs: number
     piAgentDir?: string
-    projectDir: string
-    worktreeDir: string
     developmentTimeoutMs: number
     verificationTimeoutMs: number
   },
@@ -61,8 +62,9 @@ export async function openArayaRuntime(
 
   const controlPlane = openControlPlane(config.controlPlanePath)
   const developmentRunner = options.developmentRunner ?? createDevelopmentExecutor({
-    projectDir: config.projectDir,
-    worktreeDir: config.worktreeDir,
+    devRoot: config.devRoot,
+    dataDir: config.dataDir,
+    env: config.env,
     ...(config.piAgentDir === undefined ? {} : { agentDir: config.piAgentDir }),
     taskTimeoutMs: config.developmentTimeoutMs,
     verificationTimeoutMs: config.verificationTimeoutMs

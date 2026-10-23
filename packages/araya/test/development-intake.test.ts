@@ -73,7 +73,7 @@ function createLegacyControlPlane(sqlitePath: string) {
   db.close()
 }
 
-test('observations: workspace development taskを検証して読み込む', async () => {
+test('observations: task だけを持つ workspace development task を読み込む', async () => {
   const dir = await makeTempDir()
   const inboxDir = path.join(dir, 'inbox')
   await fs.mkdir(inboxDir, { recursive: true })
@@ -85,8 +85,7 @@ test('observations: workspace development taskを検証して読み込む', asyn
       title: 'テストを追加する',
       risk: 'workspace',
       payload: {
-        task: '入力を検証し、不正値のテストを追加する',
-        verifyCommand: ['npm', 'test']
+        task: '入力を検証し、不正値のテストを追加する'
       }
     })}\n`,
     'utf8'
@@ -99,21 +98,50 @@ test('observations: workspace development taskを検証して読み込む', asyn
     assert.equal(result.observations.length, 1)
     assert.equal(result.observations[0]?.kind, 'development')
     assert.equal(result.observations[0]?.risk, 'workspace')
-    assert.deepEqual(result.observations[0]?.payload.verifyCommand, ['npm', 'test'])
+    assert.deepEqual(result.observations[0]?.payload, { task: '入力を検証し、不正値のテストを追加する' })
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
   }
 })
 
-test('observations: developmentにはtaskとargv形式のverifyCommandが必須', async () => {
+test('observations: development の payload に task 以外の key があれば理由付きで拒否する', async () => {
   const dir = await makeTempDir()
   const inboxDir = path.join(dir, 'inbox')
   await fs.mkdir(inboxDir, { recursive: true })
   await fs.writeFile(
     path.join(inboxDir, 'invalid.jsonl'),
     [
-      JSON.stringify({ id: 'development:no-task', kind: 'development', title: 'bad', risk: 'workspace', payload: { verifyCommand: ['npm', 'test'] } }),
-      JSON.stringify({ id: 'development:shell-string', kind: 'development', title: 'bad', risk: 'workspace', payload: { task: 'do work', verifyCommand: 'npm test' } }),
+      JSON.stringify({ id: 'development:verify-command', kind: 'development', title: 'bad', risk: 'workspace', payload: { task: 'do work', verifyCommand: ['npm', 'test'] } }),
+      JSON.stringify({ id: 'development:repository', kind: 'development', title: 'bad', risk: 'workspace', payload: { task: 'do work', repository: 'agentctl' } })
+    ].join('\n'),
+    'utf8'
+  )
+
+  try {
+    const result = await readObservationSource(inboxDir)
+
+    assert.deepEqual(result.observations, [])
+    assert.equal(result.errors.length, 2)
+    assert.match(result.errors[0] ?? '', /accepts only task; unsupported key\(s\): verifyCommand/u)
+    assert.match(result.errors[0] ?? '', /agent registers verification commands per repository/u)
+    assert.match(result.errors[1] ?? '', /unsupported key\(s\): repository/u)
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('observations: development の task と risk の検証を維持する', async () => {
+  const dir = await makeTempDir()
+  const inboxDir = path.join(dir, 'inbox')
+  await fs.mkdir(inboxDir, { recursive: true })
+  await fs.writeFile(
+    path.join(inboxDir, 'invalid.jsonl'),
+    [
+      JSON.stringify({ id: 'development:no-task', kind: 'development', title: 'bad', risk: 'workspace', payload: {} }),
+      JSON.stringify({ id: 'development:blank-task', kind: 'development', title: 'bad', risk: 'workspace', payload: { task: '  ' } }),
+      JSON.stringify({ id: 'development:long-task', kind: 'development', title: 'bad', risk: 'workspace', payload: { task: 'x'.repeat(20_001) } }),
+      JSON.stringify({ id: 'development:nul-task', kind: 'development', title: 'bad', risk: 'workspace', payload: { task: 'a\0b' } }),
+      JSON.stringify({ id: 'development:wrong-risk', kind: 'development', title: 'bad', risk: 'read-only', payload: { task: 'do work' } }),
       JSON.stringify({ id: 'investigate:wrong-risk', kind: 'investigate', title: 'bad', risk: 'workspace', payload: {} })
     ].join('\n'),
     'utf8'
@@ -123,10 +151,13 @@ test('observations: developmentにはtaskとargv形式のverifyCommandが必須'
     const result = await readObservationSource(inboxDir)
 
     assert.deepEqual(result.observations, [])
-    assert.equal(result.errors.length, 3)
-    assert.match(result.errors[0] ?? '', /task/u)
-    assert.match(result.errors[1] ?? '', /verifyCommand/u)
-    assert.match(result.errors[2] ?? '', /development/u)
+    assert.equal(result.errors.length, 6)
+    assert.match(result.errors[0] ?? '', /payload\.task is required/u)
+    assert.match(result.errors[1] ?? '', /payload\.task is required/u)
+    assert.match(result.errors[2] ?? '', /at most 20000 characters/u)
+    assert.match(result.errors[3] ?? '', /no NUL byte/u)
+    assert.match(result.errors[4] ?? '', /requires workspace risk/u)
+    assert.match(result.errors[5] ?? '', /requires development kind/u)
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
   }
@@ -155,7 +186,7 @@ test('control plane: legacy行とdecisionを保持してworkspace riskを追加�
           kind: 'development',
           title: 'new task',
           risk: 'workspace',
-          payload: { task: 'change source', verifyCommand: ['node', '--version'] }
+          payload: { task: 'change source' }
         }],
         'goal:workspace',
         201
