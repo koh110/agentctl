@@ -112,7 +112,7 @@ test('observations: development の payload に task 以外の key があれば�
     path.join(inboxDir, 'invalid.jsonl'),
     [
       JSON.stringify({ id: 'development:verify-command', kind: 'development', title: 'bad', risk: 'workspace', payload: { task: 'do work', verifyCommand: ['npm', 'test'] } }),
-      JSON.stringify({ id: 'development:repository', kind: 'development', title: 'bad', risk: 'workspace', payload: { task: 'do work', repository: 'agentctl' } })
+      JSON.stringify({ id: 'development:repository', kind: 'development', title: 'bad', risk: 'workspace', payload: { task: 'do work', repository: 'araya' } })
     ].join('\n'),
     'utf8'
   )

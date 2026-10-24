@@ -580,34 +580,6 @@ export function openControlPlane(sqlitePath: string) {
     return row === undefined ? undefined : mapOpportunity(row)
   }
 
-  function claimWorkspaceOpportunity(opportunityId: string, taskId: string, now: number): boolean {
-    return transaction(db, () => {
-      const opportunity = getOpportunity(opportunityId)
-
-      if (opportunity === undefined) {
-        throw new Error(`opportunity not found: ${opportunityId}`)
-      }
-
-      if (opportunity.kind !== 'development' || opportunity.risk !== 'workspace') {
-        throw new Error(`workspace execution requires a development opportunity: ${opportunityId}`)
-      }
-
-      const result = db.prepare(`
-        UPDATE opportunities
-        SET status = 'scouting', attempt_count = attempt_count + 1,
-            evidence_json = ?, updated_at = ?
-        WHERE id = ? AND status = 'discovered' AND risk = 'workspace'
-      `).run(JSON.stringify({ type: 'development_started', taskId }), now, opportunityId)
-
-      if (result.changes === 0) {
-        return false
-      }
-
-      appendEvent('opportunity.scouting', 'opportunity', opportunityId, { taskId, risk: 'workspace' }, now)
-      return true
-    })
-  }
-
   function startOpportunities(opportunityIds: readonly string[], now: number) {
     transaction(db, () => {
       for (const opportunityId of opportunityIds) {
@@ -784,7 +756,6 @@ export function openControlPlane(sqlitePath: string) {
   return {
     db,
     appendEvent,
-    claimWorkspaceOpportunity,
     close: () => db.close(),
     countOpportunities,
     dueGoalIds,

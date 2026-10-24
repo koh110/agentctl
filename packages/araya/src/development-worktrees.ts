@@ -1,5 +1,4 @@
 import { execFile } from 'node:child_process'
-import { createHash } from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 
@@ -28,7 +27,7 @@ const GIT_REPOSITORY_ENV_KEYS = [
 ] as const
 const WORKTREE_DIRECTORY = '.worktree'
 const EXCLUDE_LINE = '/.worktree/'
-const TASK_KEY_PATTERN = /^development-[0-9a-f]{20}$/u
+const TASK_KEY_PATTERN = /^task-[1-9][0-9]{0,15}-[1-9][0-9]{0,15}-[a-z2-7]{6}$/u
 const SHA_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u
 const WORKTREE_RECORD_KEYS = [
   'base',
@@ -96,13 +95,9 @@ function truncate(value: string, length: number) {
   return value.length > length ? `${value.slice(0, length)}...` : value
 }
 
-export function computeTaskKey(opportunityId: string) {
-  return `development-${createHash('sha256').update(opportunityId).digest('hex').slice(0, 20)}`
-}
-
 function validateTaskKey(taskKey: string) {
   if (typeof taskKey !== 'string' || !TASK_KEY_PATTERN.test(taskKey)) {
-    throw createError('task_key_invalid', 'taskKey must be "development-" followed by 20 lowercase hex characters')
+    throw createError('task_key_invalid', 'taskKey must be "task-<Task ID>-<attempt number>-" followed by 6 characters of a-z and 2-7')
   }
 }
 

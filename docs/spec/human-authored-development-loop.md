@@ -1,5 +1,7 @@
 # 人が投入する開発課題を処理する自動ループ
 
+> 注記: この文書のうち、worker（Pi の SDK の session）で課題を動かす部分は、worker を撤去する手順で撤去し、[Task の台帳と SHIKI の実行](task-ledger-and-shiki-runner.md)の仕様（Task の台帳と常駐する runner）に置き換えた。SHIKI の作業と完了の判定（worktree、検証の登録と実行、結果の判定）は、この文書を基準のままにする。inbox の development の課題は、今は実行されずに `blocked` になる。
+
 ## 概要
 
 Araya の利用者が JSONL inbox に開発課題を書くことが、実行開始の承認になる。別の approve 操作は不要。Araya は due tick で課題を1件選び、Pi coding agent を開発 root（既定 `~/dev`）で動かす。agent は課題に必要な repository を自分で判断し（複数でもよい）、変更する repository ごとに、その repository の `.worktree/` 配下へ課題用の worktree を作って実装する。agent の終了後、Araya は agent が登録した検証コマンドを最終状態の worktree で実行し、worktree ごとの差分と検証結果を記録して止まる。
@@ -58,7 +60,7 @@ Araya は sandbox による隔離を行わない。agent と検証コマンド�
 
 ## `araya_create_worktree`
 
-入力例: `{"repository":"agentctl","base":"origin/main"}`。`base` は省略でき、既定は `HEAD`。
+入力例: `{"repository":"araya","base":"origin/main"}`。`base` は省略でき、既定は `HEAD`。
 
 - `repository` は開発 root からの相対 path。空、絶対 path、`..` の segment、NUL を含むもの、200文字を超えるものは拒否する。
 - `<開発 root>/<repository>` の realpath が開発 root の内側にあり、Git の main working tree の root であること。`git rev-parse --show-toplevel` が同じ path を返し、`--absolute-git-dir` と `--git-common-dir` の解決先が一致することで確かめる。linked worktree と、`.worktree` という segment を path に含むものは拒否する。
@@ -75,7 +77,7 @@ Araya は sandbox による隔離を行わない。agent と検証コマンド�
 
 ## `araya_register_verification`
 
-入力例: `{"repository":"agentctl","command":["npm","test"],"cwd":"packages/araya"}`。`cwd` は省略できる。
+入力例: `{"repository":"araya","command":["npm","test"],"cwd":"packages/araya"}`。`cwd` は省略できる。
 
 - `repository` は、この課題で `araya_create_worktree` が作った worktree のものに限る。
 - `command` は 1〜64 要素の文字列配列。各要素は NUL を含まず、合計 32,768 文字以内。shell を通さず argv として実行する。

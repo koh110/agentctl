@@ -17,6 +17,7 @@
   },
   "scripts": {
     "araya": "node packages/araya/bin/cli.ts",
+    "prebuild": "node scripts/clean-build-output.mjs",
     "build": "tsc -p tsconfig.build.json",
     "postbuild": "node scripts/copy-package-metadata.mjs",
     "deploy": "sh scripts/deploy.sh",

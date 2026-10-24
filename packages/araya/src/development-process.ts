@@ -1,24 +1,14 @@
 import { spawn } from 'node:child_process'
 import fs from 'node:fs/promises'
-import path from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { TextDecoder } from 'node:util'
-
-import { parseSessionModel, type DevelopmentModel } from './development-model.ts'
 
 const MAX_STDOUT_BYTES = 128 * 1024
 const MAX_STDERR_BYTES = 64 * 1024
 const MAX_TERMINATION_GRACE_MS = 60 * 1000
 const DEFAULT_TERMINATION_GRACE_MS = 250
 const ABANDONMENT_AFTER_KILL_MS = 3000
-const WORKER_STDOUT_BYTES = 64 * 1024
-const WORKER_STDERR_BYTES = 8 * 1024
-const WORKER_TERMINATION_GRACE_MS = 10 * 1000
 const VERIFICATION_OUTPUT_BYTES = 8 * 1024
 const VERIFICATION_TERMINATION_GRACE_MS = 2000
-const MAX_SUMMARY_CHARS = 4000
-const MAX_WORKER_ERROR_MESSAGE_CHARS = 500
-const WORKER_ERROR_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9]{0,63}$/u
 
 export type OutputOptions = {
   // strict: 上限超過または不正な UTF-8 で process を止める。tail: 止めずに末尾だけ残す
@@ -37,17 +27,14 @@ export type BoundedProcessResult = {
   terminationConfirmed: boolean
 }
 
-export type PiWorkerInput = {
-  devRoot: string
-  stateDir: string
-  taskKey: string
-  agentDir: string
-  title: string
-  task: string
+export type BoundedCommandOptions = {
+  cwd?: string
+  env?: Readonly<Record<string, string | undefined>>
+  input?: string
   timeoutMs: number
-  // 設定ファイルで指定した model。null なら Pi の設定で選ぶ
-  model: DevelopmentModel | null
-  env: Readonly<Record<string, string | undefined>>
+  terminationGraceMs?: number
+  stdout?: OutputOptions
+  stderr?: OutputOptions
 }
 
 export type VerificationCommandInput = {
@@ -71,19 +58,6 @@ export type VerificationCommandResult = {
 
 function isErrno(error: unknown, code: string) {
   return error instanceof Error && 'code' in error && error.code === code
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-function makeProcessError(
-  message: string,
-  terminationConfirmed: boolean,
-  code: string,
-  extra: Record<string, unknown> = {}
-) {
-  return Object.assign(new Error(message), { terminationConfirmed, code, ...extra })
 }
 
 function makeStrictCapture(limit: number, onFailure: (reason: 'output_overflow' | 'invalid_utf8') => void) {
@@ -173,15 +147,7 @@ function makeCapture(options: OutputOptions, onFailure: (reason: 'output_overflo
 export async function runBoundedCommand(
   command: string,
   args: readonly string[],
-  options: {
-    cwd?: string
-    env?: Readonly<Record<string, string | undefined>>
-    input?: string
-    timeoutMs: number
-    terminationGraceMs?: number
-    stdout?: OutputOptions
-    stderr?: OutputOptions
-  }
+  options: BoundedCommandOptions
 ) {
   // process group で子孫ごと止めるため Windows は対象外
   if (process.platform === 'win32') {
@@ -344,149 +310,6 @@ export async function runBoundedCommand(
   }
 
   return result
-}
-
-// build 前は .ts、build 後は .js の worker を、この module と同じ package から探す
-async function resolveWorkerPath() {
-  const modulePath = fileURLToPath(import.meta.url)
-  const packageRoot = path.resolve(path.dirname(modulePath), '..')
-  const workerPath = path.join(packageRoot, 'bin', `development-worker${path.extname(modulePath)}`)
-  let stat
-
-  try {
-    stat = await fs.lstat(workerPath)
-  } catch (error) {
-    if (isErrno(error, 'ENOENT') || isErrno(error, 'ENOTDIR')) {
-      throw makeProcessError(`development worker entrypoint was not found: ${workerPath}`, true, 'pi_worker_unavailable')
-    }
-
-    throw error
-  }
-
-  if (!stat.isFile()) {
-    throw makeProcessError(`development worker entrypoint is not a regular file: ${workerPath}`, true, 'pi_worker_unavailable')
-  }
-
-  return workerPath
-}
-
-// model は、session の model が決まった後なら実際の session の値、決まる前の失敗なら null
-function parseWorkerResponse(value: unknown) {
-  if (!isRecord(value)) {
-    return undefined
-  }
-
-  const keys = Object.keys(value).sort().join(',')
-
-  if (keys === 'model,status,summary' && value.status === 'completed' && typeof value.summary === 'string') {
-    const model = parseSessionModel(value.model)
-
-    return model === undefined ? undefined : { status: 'completed' as const, summary: value.summary, model }
-  }
-
-  if (
-    keys === 'errorMessage,errorName,model,status' &&
-    value.status === 'failed' &&
-    typeof value.errorName === 'string' &&
-    WORKER_ERROR_NAME_PATTERN.test(value.errorName) &&
-    typeof value.errorMessage === 'string' &&
-    value.errorMessage.length <= MAX_WORKER_ERROR_MESSAGE_CHARS
-  ) {
-    const model = value.model === null ? null : parseSessionModel(value.model)
-
-    return model === undefined
-      ? undefined
-      : { status: 'failed' as const, errorName: value.errorName, errorMessage: value.errorMessage, model }
-  }
-
-  return undefined
-}
-
-export function parsePiWorkerResult(result: BoundedProcessResult) {
-  if (!result.terminationConfirmed) {
-    throw makeProcessError('Pi worker process termination could not be confirmed', false, 'termination_unconfirmed')
-  }
-
-  if (result.terminationReason !== undefined) {
-    const failure = result.terminationReason === 'timeout'
-      ? { message: 'Pi worker timed out', code: 'agent_timeout' }
-      : result.terminationReason === 'output_overflow'
-        ? { message: 'Pi worker output exceeded its byte limit', code: 'pi_worker_output_overflow' }
-        : { message: 'Pi worker output was not valid UTF-8', code: 'pi_worker_invalid_utf8' }
-    throw makeProcessError(failure.message, true, failure.code)
-  }
-
-  let parsed: unknown
-
-  try {
-    parsed = JSON.parse(result.stdout)
-  } catch {
-    throw makeProcessError('Pi worker returned an invalid response', true, 'pi_worker_invalid_response')
-  }
-
-  const response = parseWorkerResponse(parsed)
-
-  if (response === undefined) {
-    throw makeProcessError('Pi worker returned an invalid response', true, 'pi_worker_invalid_response')
-  }
-
-  if (response.status === 'failed') {
-    throw makeProcessError(
-      `Pi development worker failed: ${response.errorName}: ${response.errorMessage}`,
-      true,
-      'pi_worker_failed',
-      {
-        workerErrorName: response.errorName,
-        workerErrorMessage: response.errorMessage,
-        ...(response.model === null ? {} : { workerModel: response.model })
-      }
-    )
-  }
-
-  if (result.signal !== null) {
-    throw makeProcessError('Pi worker exited after receiving a signal', true, 'pi_worker_signal_exit')
-  }
-
-  if (result.exitCode === null) {
-    throw makeProcessError('Pi worker exit status is unavailable', true, 'pi_worker_exit_unknown')
-  }
-
-  if (result.exitCode !== 0) {
-    throw makeProcessError('Pi worker exited with a non-zero status', true, 'pi_worker_nonzero_exit')
-  }
-
-  if (response.summary.trim().length === 0) {
-    throw makeProcessError('Pi development worker returned an empty summary', true, 'pi_worker_empty_summary')
-  }
-
-  return { summary: response.summary.slice(0, MAX_SUMMARY_CHARS), model: response.model }
-}
-
-export async function runPiWorker(
-  input: PiWorkerInput,
-  dependencies: { workerPath?: string; terminationGraceMs?: number } = {}
-) {
-  const workerPath = dependencies.workerPath ?? await resolveWorkerPath()
-  const result = await runBoundedCommand(process.execPath, [workerPath], {
-    cwd: input.devRoot,
-    env: { ...input.env, PI_CODING_AGENT_DIR: input.agentDir },
-    input: JSON.stringify({
-      agentDir: input.agentDir,
-      devRoot: input.devRoot,
-      model: input.model,
-      stateDir: input.stateDir,
-      task: input.task,
-      taskKey: input.taskKey,
-      timeoutMs: input.timeoutMs,
-      title: input.title
-    }),
-    timeoutMs: input.timeoutMs,
-    terminationGraceMs: dependencies.terminationGraceMs ?? WORKER_TERMINATION_GRACE_MS,
-    stdout: { mode: 'strict', limitBytes: WORKER_STDOUT_BYTES },
-    stderr: { mode: 'tail', limitBytes: WORKER_STDERR_BYTES }
-  })
-
-  return parsePiWorkerResult(result)
 }
 
 async function isDirectory(target: string) {

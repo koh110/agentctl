@@ -612,7 +612,7 @@ test('tick: read-only 候補は executor 不在で blocked になり、external 
   assert.equal(status.activeTasks.length, 0)
 })
 
-test('tick: workspace development taskを一度実行し、検証証拠を保存する', async () => {
+test('tick: inbox の development taskは worker も model も起動せずに blocked になる', async () => {
   const { config } = await makeConfig()
   await fs.mkdir(config.inboxDir, { recursive: true })
   await fs.writeFile(
@@ -626,52 +626,31 @@ test('tick: workspace development taskを一度実行し、検証証拠を保存
     })}\n`,
     'utf8'
   )
-  const executedIds: string[] = []
 
-  const tickResult = await tickAraya(config, {
-    developmentRunner: async (opportunity) => {
-      executedIds.push(opportunity.id)
-
-      return {
-        status: 'completed',
-        evidence: {
-          taskKey: 'development-00000000000000000000',
-          devRoot: '/tmp/araya-test-dev',
-          outcome: 'completed',
-          summary: 'fixture file を作りました。',
-          worktrees: [{
-            repository: 'fixture',
-            worktreePath: '/tmp/araya-test-dev/fixture/.worktree/araya-development-00000000000000000000',
-            changedFiles: ['src/fixture.ts'],
-            verifications: [{ command: ['node', '--version'], cwd: '', status: 'passed', exitCode: 0 }]
-          }]
-        }
-      }
-    }
-  })
+  const tickResult = await tickAraya(config)
 
   assert.equal(tickResult.status, 'due')
   assert.equal(tickResult.settled?.state.outcome.status, 'completed')
-  assert.deepEqual(executedIds, ['development:integration'])
 
   const controlPlane = openControlPlane(config.controlPlanePath)
 
   try {
     const opportunity = controlPlane.getOpportunity('development:integration')
     assert.equal(opportunity?.kind, 'development')
-    assert.equal(opportunity?.status, 'completed')
-    assert.equal(opportunity?.evidence?.taskKey, 'development-00000000000000000000')
-    assert.equal(opportunity?.evidence?.outcome, 'completed')
-    assert.equal(opportunity?.evidence?.type, 'development_result')
-    assert.deepEqual(opportunity?.evidence?.worktrees, [{
-      repository: 'fixture',
-      worktreePath: '/tmp/araya-test-dev/fixture/.worktree/araya-development-00000000000000000000',
-      changedFiles: ['src/fixture.ts'],
-      verifications: [{ command: ['node', '--version'], cwd: '', status: 'passed', exitCode: 0 }]
-    }])
+    assert.equal(opportunity?.status, 'blocked')
+    assert.deepEqual(opportunity?.evidence, {
+      type: 'development_executor_unavailable',
+      opportunityId: 'development:integration'
+    })
   } finally {
     controlPlane.close()
   }
+
+  // 状態 directory を作らない（SHIKI を動かしていない）
+  await assert.rejects(fs.lstat(path.join(config.dataDir, 'development')), { code: 'ENOENT' })
+
+  const status = await statusAraya(config)
+  assert.equal(status.activeTasks.length, 0)
 })
 
 test('tick: 次回起床前なら idle とし、task を増殖させない', async () => {
