@@ -32,13 +32,14 @@ PR #7 で決めた方針:
 
 利用者の選択:
 
-- 手順1 の PR で、コードと文書に残る旧名を `araya` に直す（「名前の統一」）。
+- 手順1 の最初の PR（worker を撤去する PR）で、コードと文書に残る旧名を `araya` に直す（「名前の統一」）。
 - 将来は並列数を上げられるようにする。MVP の上限は 1 のまま（「並列数を上げるとき」）。
 - SHIKI は pi-durable で動かす。既にある依存の機能を使わずに自前で作ることはしない。
 - 厳密な起動数の管理より、dots のように動き続けて作業を続けられる仕組みにする。このため、試行ごとに process を起動せず、常駐する runner（systemd の user service）が Task を動かし続ける。`araya task` は Linux と systemd の user manager を前提にする。
 - runner を止めるのは一時停止として扱い、Task をやめるときは Task ごとに中止する。
 - 旧経路の worker は、この手順で、runner より先に撤去する（「旧経路との関係」）。SHIKI を動かすのは runner だけにし、旧経路と runner を同時に使っても SHIKI が同時に2つ動かないようにする。前の版では、worker を残して runner と実行枠を共有せず、SHIKI が同時に2つ動くことを手順4 までの既知の制限にしていた（その前の版では、旧経路の worker も同じ枠で数えていた）。
 - araya はまだ運用していないので、動いている旧経路からの入れ替え（後方互換性）は考えない。worker を撤去してから runner ができるまでは、development の課題を動かす経路が無くてよい。
+- worker の撤去（名前の統一を含む）は、この仕様を追加する PR（#8）に含める。この PR を「worker を撤去する PR」と呼ぶ。前の版では、別の PR にしていた。
 
 ## 用語
 
@@ -649,7 +650,7 @@ command:
 
 ## 旧経路との関係
 
-利用者の選択で、旧経路の worker をこの手順で撤去する。SHIKI を動かすのは runner だけになり、旧経路と runner を同時に使っても、SHIKI が同時に2つ動くことは無い。araya はまだ運用していないので、撤去は runner より先に、別の PR で行う（利用者の判断）。worker を撤去してから runner ができるまでは、development の課題を動かす経路が無い。旧経路と runner の両方で development の課題を動かせる版は作らない。動いている旧経路からの入れ替え（実行中の worker、旧経路が実行を始めた課題、旧形式の taskKey の worktree と branch）は扱わない。
+利用者の選択で、旧経路の worker をこの手順で撤去する。SHIKI を動かすのは runner だけになり、旧経路と runner を同時に使っても、SHIKI が同時に2つ動くことは無い。araya はまだ運用していないので、撤去は runner より先に行い、この仕様を追加する PR（#8。worker を撤去する PR）に含める（利用者の判断）。worker を撤去してから runner ができるまでは、development の課題を動かす経路が無い。旧経路と runner の両方で development の課題を動かせる版は作らない。動いている旧経路からの入れ替え（実行中の worker、旧経路が実行を始めた課題、旧形式の taskKey の worktree と branch）は扱わない。
 
 ### 撤去するもの
 
@@ -697,7 +698,7 @@ MVP の上限は 1。将来上げられるように、次のように作る。
 
 ## 名前の統一
 
-旧名（`agentctl`）を次の箇所で `araya` に直す。
+worker を撤去する PR で、旧名（`agentctl`）を次の箇所で `araya` に直す。
 
 - README の inbox の例（`payload.task` の文）
 - `docs/spec/human-authored-development-loop.md` の `araya_create_worktree` と `araya_register_verification` の入力例
@@ -714,7 +715,7 @@ MVP の上限は 1。将来上げられるように、次のように作る。
 - SHIKI の tool（pi-durable 版）と instructions: `packages/araya/src/shiki.ts`。`araya_create_worktree` は、`createWorktreeService`（`development-worktrees.ts`）に git を起動する関数を渡して使う（必須の引数にし、`execFile` で直接起動する経路は残さない）
 - systemd の操作（`systemctl`・`systemd-run`・`loginctl` の呼び出し、scope の command、unit file の内容。test で差し替える）: `packages/araya/src/systemd-units.ts`
 - 差分の収集、検証、判定: executor の、SHIKI が終わった後の部分を `development.ts` の中で関数に切り出す（executor のほかの部分は撤去する。「旧経路との関係」）。git と検証のコマンドを起動する関数を必須の引数で受け取り、runner は scope の中で起動する関数を渡す。検証のコマンドの実行（`runBoundedCommand`）に、中止の signal を受け取る引数を足す
-- 旧経路の worker の撤去（runner より先の PR）: 「旧経路との関係」の「撤去するもの」と「新しい経路に移して使うもの」
+- 旧経路の worker の撤去（worker を撤去する PR。runner より先）: 「旧経路との関係」の「撤去するもの」と「新しい経路に移して使うもの」
 - runner の entrypoint: `packages/araya/bin/task-runner.ts`
 - CLI: `packages/araya/src/cli.ts` に `task` と `runner` を加える
 
@@ -788,7 +789,7 @@ test は実際の Pi auth や model API を使わない。model は pi-ai の fa
 - [ ] `git grep -n -E 'development-worker|runPiWorker|parsePiWorkerResult|PiWorkerInput|runDevelopmentAgent|createAgentSession|createDevelopmentExecutor|DevelopmentTaskRunner|computeTaskKey|claimWorkspaceOpportunity' -- packages` が何も返さない。worker を撤去する PR で満たす。
 - [ ] build 済みの package（`dist`）の module で作った unit file の `ExecStart` の entrypoint は、`dist/bin/task-runner.js` の絶対 path で、その file は通常の file として存在する（撤去する `development-built.test.ts` の代わり。`npm test` は build してから実行する）。
 - [ ] 本物の systemd の test（`ARAYA_TEST_SYSTEMD=1`）: runner の main process を SIGKILL すると、`ExecStopPost` が試行の scope（`setsid` した process を含む）を止めてから、systemd が runner を起動し直し、試行が終わる。`systemctl --user stop` では起動し直さず、試行の scope も止まり、次の起動で続きから進む。restartLimit（test では小さくする）で止まるまで落ち続けても、systemd は起動し直すのをやめない。同じ unit 名で2つ目の runner は起動しない。`araya_create_worktree` の git の hook（`post-checkout`）が `setsid` で切り離して残した process は、試行の結果が記録された時点で止まっている。test の後に `araya-` で始まる unit と、test が作った process が残っていない。
-- [ ] `git grep -i agentctl -- ':!docs/spec/task-ledger-and-shiki-runner.md'` が `scripts/deploy.sh` の1行と README の1行だけを返す。
+- [ ] `git grep -i agentctl -- ':!docs/spec/task-ledger-and-shiki-runner.md'` が `scripts/deploy.sh` の1行と README の1行だけを返す。worker を撤去する PR で満たす。
 - [ ] README とこの仕様が新しい動作を説明している。
 
 ## Assumptions（方針と調査から導いた判断）
