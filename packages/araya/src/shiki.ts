@@ -32,7 +32,7 @@ export const CREATE_WORKTREE_TOOL_TEXT = {
     '.worktree が ignore されていない repository では、.git/info/exclude に /.worktree/ を追記します。'
   ].join(''),
   parameters: {
-    repository: { description: '開発 root からの相対 path で指定する repository（main clone の root）。例: agentctl' },
+    repository: { description: '開発 root からの相対 path で指定する repository（main clone の root）。例: araya' },
     base: { description: 'worktree の起点にする git revision。既定は HEAD。通常は fetch した remote の既定 branch（例: origin/main）を指定する' }
   }
 } as const

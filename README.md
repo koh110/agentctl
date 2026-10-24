@@ -46,7 +46,7 @@ npm run araya -- status
 開発課題の例:
 
 ```json
-{"id":"development:example","kind":"development","title":"入力検証を追加する","risk":"workspace","payload":{"task":"agentctl の入力で空の値を拒否し、既存のテストに回帰ケースを追加する"}}
+{"id":"development:example","kind":"development","title":"入力検証を追加する","risk":"workspace","payload":{"task":"araya の入力で空の値を拒否し、既存のテストに回帰ケースを追加する"}}
 ```
 
 `development` 行の取り込みでは形を検証します。`payload` は `task` だけを持ちます（空白以外の文字を含む20,000文字以内、NULなし）。`task` 以外のkeyを持つ課題はintakeで拒否します。

@@ -83,7 +83,7 @@ test('shiki: tool の説明の文', () => {
       '同じ repository に再度呼ぶと、作成済みの worktree をそのまま返します。' +
       '.worktree が ignore されていない repository では、.git/info/exclude に /.worktree/ を追記します。',
     parameters: {
-      repository: { description: '開発 root からの相対 path で指定する repository（main clone の root）。例: agentctl' },
+      repository: { description: '開発 root からの相対 path で指定する repository（main clone の root）。例: araya' },
       base: { description: 'worktree の起点にする git revision。既定は HEAD。通常は fetch した remote の既定 branch（例: origin/main）を指定する' }
     }
   })

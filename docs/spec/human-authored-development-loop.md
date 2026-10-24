@@ -60,7 +60,7 @@ Araya は sandbox による隔離を行わない。agent と検証コマンド�
 
 ## `araya_create_worktree`
 
-入力例: `{"repository":"agentctl","base":"origin/main"}`。`base` は省略でき、既定は `HEAD`。
+入力例: `{"repository":"araya","base":"origin/main"}`。`base` は省略でき、既定は `HEAD`。
 
 - `repository` は開発 root からの相対 path。空、絶対 path、`..` の segment、NUL を含むもの、200文字を超えるものは拒否する。
 - `<開発 root>/<repository>` の realpath が開発 root の内側にあり、Git の main working tree の root であること。`git rev-parse --show-toplevel` が同じ path を返し、`--absolute-git-dir` と `--git-common-dir` の解決先が一致することで確かめる。linked worktree と、`.worktree` という segment を path に含むものは拒否する。
@@ -77,7 +77,7 @@ Araya は sandbox による隔離を行わない。agent と検証コマンド�
 
 ## `araya_register_verification`
 
-入力例: `{"repository":"agentctl","command":["npm","test"],"cwd":"packages/araya"}`。`cwd` は省略できる。
+入力例: `{"repository":"araya","command":["npm","test"],"cwd":"packages/araya"}`。`cwd` は省略できる。
 
 - `repository` は、この課題で `araya_create_worktree` が作った worktree のものに限る。
 - `command` は 1〜64 要素の文字列配列。各要素は NUL を含まず、合計 32,768 文字以内。shell を通さず argv として実行する。
