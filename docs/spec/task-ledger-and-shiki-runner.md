@@ -8,7 +8,7 @@ PR #7 に書いた進め方の手順1。Issue #1 のチェックリストのう�
 
 Task は、常駐する runner（systemd の user service）が動かす。runner は台帳の待ちを数秒ごとに見て、Task を受け取ると SHIKI を pi-durable（`@earendil-works/pi-durable`。araya が既に依存している）の会話として動かし、落ちても止めても次の起動で続きから進める。会話と tool の記録、落ちた後の再開、途中で止まった tool の扱い、中止は pi-durable に、process の後始末と runner の二重起動の防止は systemd に任せ、araya では作らない（「Assumptions」）。
 
-この手順で、旧経路の worker（JSONL inbox の development の課題を、Pi の SDK の session で動かす process）も撤去する。SHIKI を動かすのは runner だけになる（利用者の選択。「旧経路との関係」）。
+この手順で、旧経路の worker（JSONL inbox の development の課題を、Pi の SDK の session で動かす process）も撤去する。撤去は runner より先に行い、SHIKI を動かすのは runner だけになる（利用者の選択。「旧経路との関係」）。
 
 ## 概要
 
@@ -28,7 +28,7 @@ PR #7 で決めた方針:
 
 - SHIKI は同時に1件まで動かす。ほかの Task は `queued` で待つ。
 - MVP で扱う Task は開発の Task だけ。
-- 旧経路（JSONL inbox、`tick`/`run`、goal・scout・observation・opportunity、承認・outbox、旧経路の Pi Durable（`pi-durable.sqlite` と WorkTask））は、新しい経路が動いた後に手順4で撤去する。それまでは動作を変えない（旧経路の worker だけは、利用者の選択でこの手順で撤去し、旧経路は development の課題を実行しなくなる）。
+- 旧経路（JSONL inbox、`tick`/`run`、goal・scout・observation・opportunity、承認・outbox、旧経路の Pi Durable（`pi-durable.sqlite` と WorkTask））は、新しい経路が動いた後に手順4で撤去する。それまでは動作を変えない（旧経路の worker だけは、利用者の選択でこの手順で runner より先に撤去し、旧経路は development の課題を実行しなくなる）。
 
 利用者の選択:
 
@@ -37,7 +37,8 @@ PR #7 で決めた方針:
 - SHIKI は pi-durable で動かす。既にある依存の機能を使わずに自前で作ることはしない。
 - 厳密な起動数の管理より、dots のように動き続けて作業を続けられる仕組みにする。このため、試行ごとに process を起動せず、常駐する runner（systemd の user service）が Task を動かし続ける。`araya task` は Linux と systemd の user manager を前提にする。
 - runner を止めるのは一時停止として扱い、Task をやめるときは Task ごとに中止する。
-- 旧経路の worker は、この手順で撤去する（「旧経路との関係」）。SHIKI を動かすのは runner だけにし、旧経路と runner を同時に使っても SHIKI が同時に2つ動かないようにする。前の版では、worker を残して runner と実行枠を共有せず、SHIKI が同時に2つ動くことを手順4 までの既知の制限にしていた（その前の版では、旧経路の worker も同じ枠で数えていた）。
+- 旧経路の worker は、この手順で、runner より先に撤去する（「旧経路との関係」）。SHIKI を動かすのは runner だけにし、旧経路と runner を同時に使っても SHIKI が同時に2つ動かないようにする。前の版では、worker を残して runner と実行枠を共有せず、SHIKI が同時に2つ動くことを手順4 までの既知の制限にしていた（その前の版では、旧経路の worker も同じ枠で数えていた）。
+- araya はまだ運用していないので、動いている旧経路からの入れ替え（後方互換性）は考えない。worker を撤去してから runner ができるまでは、development の課題を動かす経路が無くてよい。
 
 ## 用語
 
@@ -648,7 +649,7 @@ command:
 
 ## 旧経路との関係
 
-利用者の選択で、旧経路の worker をこの手順で撤去する。SHIKI を動かすのは runner だけになり、旧経路と runner を同時に使っても、SHIKI が同時に2つ動くことは無い（入れ替える前に動き始めた worker を除く。「入れ替えるとき」）。撤去は、runner が動く版と同じ版で行う（旧経路と runner の両方で development の課題を動かせる版も、どちらでも動かせない版も作らない）。
+利用者の選択で、旧経路の worker をこの手順で撤去する。SHIKI を動かすのは runner だけになり、旧経路と runner を同時に使っても、SHIKI が同時に2つ動くことは無い。araya はまだ運用していないので、撤去は runner より先に、別の PR で行う（利用者の判断）。worker を撤去してから runner ができるまでは、development の課題を動かす経路が無い。旧経路と runner の両方で development の課題を動かせる版は作らない。動いている旧経路からの入れ替え（実行中の worker、旧経路が実行を始めた課題、旧形式の taskKey の worktree と branch）は扱わない。
 
 ### 撤去するもの
 
@@ -662,27 +663,20 @@ command:
 
 ### 新しい経路に移して使うもの
 
+worker を撤去する PR で残し（関数への切り出しと file の移動を含む）、runner の版で使う。
+
 - executor の、SHIKI が終わった後の部分（状態 directory の記録を読み、差分を集め、検証を実行し、結果を決める）。関数に切り出し、試行の task の `evidence` の phase で使う（「実装の置き場所」）。`development.test.ts` のうち、この部分を確かめるもの（差分、検証、失敗の理由、状態 directory の記録の検証、symlink の扱い、diff の上限など）は、切り出した関数を直接呼ぶ test に直して残す。
 - 検証のコマンドの実行（`development-process.ts` の `runBoundedCommand`・`runVerificationCommand`）と、その test
 - `araya_create_worktree`・`araya_register_verification` の処理（`development-worktrees.ts`）と、その test
-- 課題の prompt、system prompt、model が使えないときの message（`development-agent.ts` から `shiki.ts` へ）
+- 課題の prompt、system prompt、model が使えないときの message、tool の説明の文（`development-agent.ts` から `shiki.ts` へ）
 - 設定ファイルと model の指定（`config-file.ts`・`development-model.ts`）と、その test
 
 ### 撤去した後の旧経路
 
-- 旧経路は development の課題を実行しない。inbox の `development` の行の取り込み（形の検証を含む）は変えない。WorkTask は、課題の形（`kind` と `risk` の組）の確認を今のまま行い、development の課題が `discovered` か `scouting`（入れ替える前に旧経路が実行を始めた課題）なら、SHIKI を動かさずに `blocked` にして（evidence は `{"type": "development_executor_unavailable", "opportunityId": ...}`）、`no_executor` で終わる。`discovered` のときは、既存の、executor が渡されていないときの動作と同じ。ほかの状態のときは、今のまま `already_handled` で終わる。
+- 旧経路は development の課題を実行しない。inbox の `development` の行の取り込み（形の検証を含む）は変えない。WorkTask は、課題の形（`kind` と `risk` の組）と状態の確認を今のまま行い、`discovered` の development の課題を、SHIKI を動かさずに `blocked` にして（evidence は `{"type": "development_executor_unavailable", "opportunityId": ...}`）、`no_executor` で終わる。既存の、executor が渡されていないときの動作と同じ。
 - それ以外の旧経路（JSONL inbox、`tick`/`run`、goal・scout・observation・opportunity、承認・outbox、旧経路の Pi Durable）の動作、schema、evidence の形は、手順4 で撤去するまで変えない。旧経路は台帳と runner を使わない。
-- README と `araya --help` は、development の課題を `araya task create` で登録し、runner が動かす説明にする。inbox に development の課題を書いても実行されず、`blocked` になることを README に書く。
+- worker を撤去する PR では、README と `araya --help` から、worker で development の課題を動かす説明を除き、inbox に development の課題を書いても実行されず `blocked` になること、Task の台帳と runner を実装中であることを書く。runner の版で、development の課題を `araya task create` で登録し、runner が動かす説明にする。
 - `docs/spec/human-authored-development-loop.md` と `docs/spec/development-model-config.md` の冒頭に、worker で課題を動かす部分はこの手順で撤去し、この仕様に置き換えたことを書く。SHIKI の作業と完了の判定、設定ファイルの形は、それぞれの文書を基準のままにする。
-
-### 入れ替えるとき
-
-この手順の版に入れ替えても、入れ替える前に動き始めた旧経路の worker は止まらない。README に次の手順を書く。
-
-1. 旧経路の `araya run` を止め、`araya tick` を実行しない。`araya run` は SIGINT・SIGTERM を受けると、実行中の tick が終わってから終わる（development の課題を実行中なら、その課題が終わるまで待つ）。
-2. 旧経路の worker の process（command line に `development-worker` を含むもの）が無いことを確かめる。worker は別の process group で動くので、`araya run` が tick の途中で終わったとき（SIGKILL など）は残る。残っていれば、終わるのを待つか止める。その課題の結果は記録されず、worktree は残る。課題は `scouting` のまま残り、入れ替えた後の旧経路の tick で `blocked` になる。
-3. `npm run deploy` で入れ替え、`araya runner install` を実行する。
-4. 旧経路を使い続けるなら、`araya run` を起動し直してよい（development の課題は実行しない）。
 
 ## 並列数を上げるとき
 
@@ -720,14 +714,14 @@ MVP の上限は 1。将来上げられるように、次のように作る。
 - SHIKI の tool（pi-durable 版）と instructions: `packages/araya/src/shiki.ts`。`araya_create_worktree` は、`createWorktreeService`（`development-worktrees.ts`）に git を起動する関数を渡して使う（必須の引数にし、`execFile` で直接起動する経路は残さない）
 - systemd の操作（`systemctl`・`systemd-run`・`loginctl` の呼び出し、scope の command、unit file の内容。test で差し替える）: `packages/araya/src/systemd-units.ts`
 - 差分の収集、検証、判定: executor の、SHIKI が終わった後の部分を `development.ts` の中で関数に切り出す（executor のほかの部分は撤去する。「旧経路との関係」）。git と検証のコマンドを起動する関数を必須の引数で受け取り、runner は scope の中で起動する関数を渡す。検証のコマンドの実行（`runBoundedCommand`）に、中止の signal を受け取る引数を足す
-- 旧経路の worker の撤去: 「旧経路との関係」の「撤去するもの」
+- 旧経路の worker の撤去（runner より先の PR）: 「旧経路との関係」の「撤去するもの」と「新しい経路に移して使うもの」
 - runner の entrypoint: `packages/araya/bin/task-runner.ts`
 - CLI: `packages/araya/src/cli.ts` に `task` と `runner` を加える
 
 ## 既知の制限
 
 - `araya task` と runner は、Linux と systemd（254 以降）の user manager が必要。logout した後も runner を動かすには、利用者が linger（`loginctl enable-linger`）を有効にする。araya は linger を変えない。linger が無効だと、logout で runner は止まり（一時停止）、次に user manager が起動したときに続きから進む。
-- この手順の版に入れ替える前に動き始めた旧経路の worker は、araya では止めない。残ったまま runner を動かすと、SHIKI が同時に2つ動くことがある。入れ替える前に止める（「旧経路との関係」の「入れ替えるとき」）。
+- worker を撤去した版から runner の版までは、development の課題を実行できない（利用者の判断。「旧経路との関係」）。
 - runner の環境変数は、unit file に書いた一覧のものと user manager の環境だけ。model の認証を環境変数だけで行っている場合は、SHIKI は model を使えず `agent_failed`（`model_unavailable`）になる。SHIKI の bash、git、検証のコマンドにも、ほかの環境変数（token、proxy の設定など）は渡らない。環境変数を変えたら `araya runner install` をやり直す。
 - araya を入れ直したとき（`npm run deploy`）は、`araya runner install`（か `systemctl --user restart <unit>`）をやり直すまで、runner は前に読み込んだコードで動き続ける。入れ直しで試行の task の定義が変わると、動いていた試行が `attempt_error` になることがある。
 - unit file に書く path と値に、ASCII の制御文字、空白、引用符、`\`、`$`、`%`、`;` を使えない（`unsupported_path`）。
@@ -790,8 +784,8 @@ test は実際の Pi auth や model API を使わない。model は pi-ai の fa
 - [ ] 台帳の接続で `busy_timeout` が 5000 になっている。複数の process から同時に書いても `SQLITE_BUSY` で失敗しない。
 - [ ] 台帳の `user_version` が未知の値なら、台帳を変更せずに失敗する。
 - [ ] Linux 以外では `araya task` と `araya runner` が `unsupported_platform` で失敗する（判定を差し替えた test）。
-- [ ] 旧経路の `araya tick` は、inbox の `development` の課題を、worker も model も起動せずに `blocked`（evidence の `type` が `development_executor_unavailable`）にする（`araya.test.ts` の、executor を渡して development の課題を実行する test を、これを確かめる test に直す）。`scouting` の development の課題（test では status を直接 `scouting` にする）も、同じく `blocked` にする。それ以外の旧経路の既存の test は、変えずに通る。
-- [ ] `git grep -n -E 'development-worker|runPiWorker|parsePiWorkerResult|PiWorkerInput|runDevelopmentAgent|createAgentSession|createDevelopmentExecutor|DevelopmentTaskRunner|computeTaskKey|claimWorkspaceOpportunity' -- packages` が何も返さない。
+- [ ] 旧経路の `araya tick` は、inbox の `development` の課題を、worker も model も起動せずに `blocked`（evidence の `type` が `development_executor_unavailable`）にする（`araya.test.ts` の、executor を渡して development の課題を実行する test を、これを確かめる test に直す）。それ以外の旧経路の既存の test は、変えずに通る。worker を撤去する PR で満たす。
+- [ ] `git grep -n -E 'development-worker|runPiWorker|parsePiWorkerResult|PiWorkerInput|runDevelopmentAgent|createAgentSession|createDevelopmentExecutor|DevelopmentTaskRunner|computeTaskKey|claimWorkspaceOpportunity' -- packages` が何も返さない。worker を撤去する PR で満たす。
 - [ ] build 済みの package（`dist`）の module で作った unit file の `ExecStart` の entrypoint は、`dist/bin/task-runner.js` の絶対 path で、その file は通常の file として存在する（撤去する `development-built.test.ts` の代わり。`npm test` は build してから実行する）。
 - [ ] 本物の systemd の test（`ARAYA_TEST_SYSTEMD=1`）: runner の main process を SIGKILL すると、`ExecStopPost` が試行の scope（`setsid` した process を含む）を止めてから、systemd が runner を起動し直し、試行が終わる。`systemctl --user stop` では起動し直さず、試行の scope も止まり、次の起動で続きから進む。restartLimit（test では小さくする）で止まるまで落ち続けても、systemd は起動し直すのをやめない。同じ unit 名で2つ目の runner は起動しない。`araya_create_worktree` の git の hook（`post-checkout`）が `setsid` で切り離して残した process は、試行の結果が記録された時点で止まっている。test の後に `araya-` で始まる unit と、test が作った process が残っていない。
 - [ ] `git grep -i agentctl -- ':!docs/spec/task-ledger-and-shiki-runner.md'` が `scripts/deploy.sh` の1行と README の1行だけを返す。
@@ -815,9 +809,8 @@ test は実際の Pi auth や model API を使わない。model は pi-ai の fa
 - restartLimit で止まった試行は `blocked` にする。試行が自分で失敗したのではなく、人の判断（再実行するか、やめるか）を待っているため。
 - 利用者が中止を求めた試行は、試行の task が先に終わっていても `cancelled` にする（利用者の選択）。CLI が中止を受け付けたのに結果が `completed` になる場合を無くし、「受け付けた中止は必ず効く」という1つの規則にするため。pi-durable は終わった task への `abortTask` では何もしないので、台帳に結果を記録する transaction で中止の求めを確かめる。試行の task が集めた evidence は、中止の後でも何が行われたかを確かめられるように残す。
 - Harness が storage の誤りで閉じたときは、runner を終了 code 1 で終わらせ、systemd に起動し直させる。pi-durable は失敗した Harness を回復せず、開き直すことを求める。runner の中で開き直すより、起動時の確認と後始末（scope の停止、開き直したときの確認）を同じ経路で通せるため。
-- 旧経路の worker は、手順4 を待たずにこの手順で撤去する（利用者の選択）。worker を残すと、旧経路と runner を同時に使ったときに SHIKI が同時に2つ動く。実行枠を共有するには、旧経路の holder の生死の判定と、holder が残した子 process の後始末が要り、手順4 で撤去する旧経路のためだけの仕組みになる（前の版では、holder が消えた後に子 process が残り、空いた枠で次の試行と重なる問題があった）。撤去すれば、SHIKI を動かすのは runner だけになり、新旧を通して同時に動く SHIKI は実行枠の上限までになる（入れ替える前に動き始めた worker を除く。「既知の制限」）。
-- 撤去した後に旧経路に入った development の課題は、既存の、executor が渡されていないときの動作で `blocked` にし、intake では拒否しない。旧経路の scout は動くたびに inbox を読み直すので、intake で拒否すると、inbox に残った行が scout のたびに `inbox.read_errors` になる。手順4 で旧経路ごと撤去するので、旧経路の変更は、executor を外すことと、そのために終わらなくなる課題を片付けることだけにする。
-- `scouting` の development の課題（入れ替える前に旧経路が実行を始め、結果を記録しなかった課題）も `blocked` にする。executor を外すと、この課題が終わることは無い。旧経路の scout は `scouting` の課題を選び直し、workspace の課題は1回に1件しか選ばないので、残しておくと、後から inbox に書いた development の課題が選ばれず、`discovered` のまま残る。
+- 旧経路の worker は、手順4 を待たずにこの手順で撤去する（利用者の選択）。worker を残すと、旧経路と runner を同時に使ったときに SHIKI が同時に2つ動く。実行枠を共有するには、旧経路の holder の生死の判定と、holder が残した子 process の後始末が要り、手順4 で撤去する旧経路のためだけの仕組みになる（前の版では、holder が消えた後に子 process が残り、空いた枠で次の試行と重なる問題があった）。撤去すれば、SHIKI を動かすのは runner だけになり、新旧を通して同時に動く SHIKI は実行枠の上限までになる。runner より先に撤去するのは、araya をまだ運用しておらず、runner ができるまで development の課題を動かせなくてもよいため（利用者の判断）。動いている旧経路からの入れ替えも扱わない。
+- 撤去した後に旧経路に入った development の課題は、既存の、executor が渡されていないときの動作で `blocked` にし、intake では拒否しない。旧経路の scout は動くたびに inbox を読み直すので、intake で拒否すると、inbox に残った行が scout のたびに `inbox.read_errors` になる。手順4 で旧経路ごと撤去するので、旧経路の変更は、executor を外すことだけにする。
 - worker を撤去しても、差分の収集・検証・判定、課題の prompt と instructions、`araya_create_worktree`・`araya_register_verification` の処理は、新しい経路に移して使う（「旧経路との関係」）。SHIKI の作業と完了の判定を変えないため。
 - runner の unit は unit file として入れる（`araya runner install`）。transient unit は host の再起動で消え、再起動の後に runner が自動で起動しないため。CLI は runner を起動しない。止めてある runner を、Task の登録で勝手に動かさないため。
 - unit file に書く値の文字を制限する。unit file の specifier（`%`）、変数（`$`）、引用の escape を作らずに済ませるため。普通の path（`/home/<user>/.araya` など）は当たらない。
@@ -889,9 +882,8 @@ pi-durable と Pi は 1.4.0、Node.js は v26.12.1、systemd は 259。model は
 - `araya_create_worktree`（`development-worktrees.ts`）は、git を `execFile` で起動し（決まった候補から選んだ絶対 path。timeout は 60 秒、`git worktree add` は 10 分、出力は 2 MiB まで、timeout のときは SIGKILL）、hook を無効にしない。差分の収集（`development.ts`）の git は `runBoundedCommand` で起動し、`core.hooksPath=/dev/null` を付ける。`araya_register_verification` は subprocess を起動しない（path の確認と file の追記だけ）。
 - 既存の SHIKI（`development-agent.ts`）は、model が設定されていなければ Pi の SDK（`createAgentSession`）に model を選ばせ、設定されていれば `ModelRuntime` に無いときと認証が無いときに `model_unavailable` の誤りにする。
 - 既存の development worker の entrypoint は、`development-process.ts` の module の1つ上の directory を package root とし、その `bin/` から、module と同じ拡張子で探す（build 前は `.ts`、build 後は `.js`）。通常の file でなければ起動しない。build 済みの package でこれを確かめる test（`development-built.test.ts`）がある。
-- 既存の WorkTask は、executor が渡されていないとき、kind と risk の組が正しく `discovered` の development の課題を `blocked`（evidence は `{"type": "development_executor_unavailable", "opportunityId": ...}`）にし、`no_executor` で終わる。この経路の test は無い。executor があるときは、`claimWorkspaceOpportunity` で課題を `scouting`（evidence は `development_started`）にしてから executor を呼ぶ。development の課題が `scouting` なら、`already_handled` で終わる。そのため、executor の実行中に process が止まった課題は `scouting` のまま残る。
-- 既存の scout は、動くたびに inbox を読み直し、不正な行があれば `inbox.read_errors` の event を追加する。`discovered`・`scouting`・`approved` の課題を、`discovered_at` の古い順に `maxActions` 件まで取り、そのうち workspace の課題は1件だけ WorkTask にする。
-- 既存の `araya run` は、SIGINT・SIGTERM を受けると、実行中の tick が終わってから終わる。`runBoundedCommand` は worker を別の process group で起動するので、`araya run` が tick の途中で終わると、worker は残る。
+- 既存の WorkTask は、executor が渡されていないとき、kind と risk の組が正しく `discovered` の development の課題を `blocked`（evidence は `{"type": "development_executor_unavailable", "opportunityId": ...}`）にし、`no_executor` で終わる。この経路の test は無い。
+- 既存の scout は、動くたびに inbox を読み直し、不正な行があれば `inbox.read_errors` の event を追加する。
 - 既存のコードで、`computeTaskKey` を使うのは旧経路の executor（`development.ts`）だけ、`claimWorkspaceOpportunity` を使うのは WorkTask の executor の呼び出しの前だけ、`hasUsableModel`・`findAssistantFailure`・`DEVELOPMENT_TOOL_NAMES` を使うのは `development-agent.ts` だけ（どれも、ほかに使っているのは test だけ）。
 - 既存の control plane は `node:sqlite` の `DatabaseSync` を使い、`busy_timeout` を設定していない。台帳では接続ごとに設定する。
 
