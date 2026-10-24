@@ -1,30 +1,19 @@
 import { constants as fsConstants } from 'node:fs'
 import fs from 'node:fs/promises'
 import type { FileHandle } from 'node:fs/promises'
-import os from 'node:os'
 import path from 'node:path'
 import { TextDecoder } from 'node:util'
 
-import type { Opportunity } from './control-plane.ts'
-import { parseSessionModel, type DevelopmentModel, type SessionModel } from './development-model.ts'
-import {
-  runBoundedCommand,
-  runPiWorker,
-  runVerificationCommand,
-  type PiWorkerInput,
-  type VerificationCommandInput,
-  type VerificationCommandResult
+import type { SessionModel } from './development-model.ts'
+import type {
+  BoundedCommandOptions,
+  BoundedProcessResult,
+  VerificationCommandInput,
+  VerificationCommandResult
 } from './development-process.ts'
-import {
-  computeTaskKey,
-  createTaskState,
-  readTaskState,
-  type VerificationRecord,
-  type WorktreeRecord
-} from './development-worktrees.ts'
+import { readTaskState, type VerificationRecord, type WorktreeRecord } from './development-worktrees.ts'
 
 const MAX_TASK_TIMEOUT_MS = 60 * 60 * 1000
-const MAX_TASK_CHARS = 20_000
 const MAX_SUMMARY_CHARS = 4000
 const MAX_FAILURE_DETAIL_CHARS = 500
 const MAX_GIT_OUTPUT_BYTES = 2 * 1024 * 1024
@@ -47,35 +36,44 @@ const GIT_REPOSITORY_ENV_KEYS = [
   'GIT_WORK_TREE'
 ] as const
 
-export type DevelopmentExecution = {
+// SHIKI が使った model と、それを選んだ設定の出どころ
+export type AgentModelEvidence = SessionModel & { source: 'araya-config' | 'pi-settings' }
+
+// SHIKI の終わり方。差分の収集と検証は、これを受け取ってから行う
+export type AgentOutcome =
+  | { status: 'completed'; summary: string; model: AgentModelEvidence }
+  | { status: 'failed' | 'timeout'; error: string; model?: AgentModelEvidence }
+
+// git を起動する関数。runBoundedCommand と同じ形。runner は試行の scope の中で起動する関数を渡す
+export type GitCommandRunner = (
+  command: string,
+  args: readonly string[],
+  options: BoundedCommandOptions
+) => Promise<BoundedProcessResult>
+
+export type DevelopmentResult = {
   status: 'completed' | 'failed'
   evidence: Record<string, unknown>
 }
 
-export type DevelopmentTaskRunner = (opportunity: Opportunity) => Promise<DevelopmentExecution>
-
-export type DevelopmentExecutorOptions = {
+export type DevelopmentResultInput = {
+  taskKey: string
+  // 開発 root の実 path（呼び出し側で解決済み）
   devRoot: string
-  dataDir: string
+  stateDir: string
+  agent: AgentOutcome
   env: Readonly<Record<string, string | undefined>>
-  agentDir?: string
-  taskTimeoutMs?: number
-  verificationTimeoutMs?: number
-  // 設定ファイルで指定した model。省略か null なら Pi の設定で選ぶ
-  developmentModel?: DevelopmentModel | null
+  verificationTimeoutMs: number
 }
 
-type DevelopmentExecutorDependencies = {
-  runAgent?: (input: PiWorkerInput) => Promise<{ summary: string; model: SessionModel }>
-  runVerification?: (input: VerificationCommandInput) => Promise<VerificationCommandResult>
-  // 差分の収集に使う git（test 用）
+export type DevelopmentResultDependencies = {
+  runGit: GitCommandRunner
+  runVerification: (input: VerificationCommandInput) => Promise<VerificationCommandResult>
+  // 差分の収集に使う git（test 用）。省略時は GIT_CANDIDATES から選ぶ
   gitExecutable?: string
 }
 
 type FailureReason =
-  | 'invalid_task'
-  | 'dev_root_missing'
-  | 'task_state_already_exists'
   | 'termination_unconfirmed'
   | 'task_state_invalid'
   | 'evidence_collection_failed'
@@ -85,22 +83,10 @@ type FailureReason =
   | 'verification_missing'
   | 'verification_failed'
 
-// model は worker が報告した session の model と、それを選んだ設定の出どころ
-type AgentModelEvidence = SessionModel & { source: 'araya-config' | 'pi-settings' }
-
-type AgentOutcome =
-  | { status: 'completed'; summary: string; model: AgentModelEvidence }
-  | {
-    status: 'failed' | 'timeout'
-    error: string
-    workerErrorName?: string
-    workerErrorMessage?: string
-    model?: AgentModelEvidence
-  }
-
 type GitContext = {
   executable: string
   env: Record<string, string | undefined>
+  run: GitCommandRunner
 }
 
 type DiffEvidence = {
@@ -137,28 +123,6 @@ function isErrno(error: unknown, code: string) {
   return error instanceof Error && 'code' in error && error.code === code
 }
 
-function isTerminationUnconfirmed(error: unknown) {
-  return error instanceof Error && 'terminationConfirmed' in error && error.terminationConfirmed === false
-}
-
-function getErrorCode(error: unknown) {
-  if (error instanceof Error && 'code' in error && typeof error.code === 'string') {
-    return error.code
-  }
-
-  return 'development_agent_failed'
-}
-
-function getStringProperty(error: unknown, key: string) {
-  if (error instanceof Error && key in error) {
-    const value: unknown = Reflect.get(error, key)
-
-    return typeof value === 'string' ? value : undefined
-  }
-
-  return undefined
-}
-
 function describeError(error: unknown) {
   const message = error instanceof Error ? error.message : String(error)
 
@@ -169,45 +133,6 @@ function validateTimeout(timeoutMs: number, name: string) {
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > MAX_TASK_TIMEOUT_MS) {
     throw new Error(`${name} must be between 1000 and ${MAX_TASK_TIMEOUT_MS} milliseconds`)
   }
-}
-
-// intake と同じ検証を executor でもう一度行う
-function validateOpportunity(opportunity: Opportunity) {
-  if (opportunity.kind !== 'development' || opportunity.risk !== 'workspace') {
-    throw new Error('development task requires kind development and risk workspace')
-  }
-
-  const unsupportedKeys = Object.keys(opportunity.payload).filter((key) => {
-    return key !== 'task'
-  })
-
-  if (unsupportedKeys.length > 0) {
-    throw new Error(`development payload accepts only task; unsupported key(s): ${unsupportedKeys.join(', ')}`)
-  }
-
-  const task = opportunity.payload.task
-
-  if (typeof task !== 'string' || task.trim() === '' || task.length > MAX_TASK_CHARS || task.includes('\0')) {
-    throw new Error(`development task must be a non-blank string of at most ${MAX_TASK_CHARS} characters without NUL`)
-  }
-
-  return task
-}
-
-async function resolveDevRoot(devRoot: string) {
-  try {
-    const devRootReal = await fs.realpath(devRoot)
-
-    if ((await fs.stat(devRootReal)).isDirectory()) {
-      return devRootReal
-    }
-  } catch (error) {
-    if (!isErrno(error, 'ENOENT') && !isErrno(error, 'ENOTDIR')) {
-      throw error
-    }
-  }
-
-  return undefined
 }
 
 async function findGitExecutable() {
@@ -244,7 +169,7 @@ function createGitEnv(env: Readonly<Record<string, string | undefined>>) {
 }
 
 async function runGit(git: GitContext, worktreePath: string, args: readonly string[], stdoutLimitBytes = MAX_GIT_OUTPUT_BYTES) {
-  const result = await runBoundedCommand(git.executable, [
+  const result = await git.run(git.executable, [
     '-C', worktreePath,
     '-c', 'core.hooksPath=/dev/null',
     '-c', 'core.pager=cat',
@@ -591,251 +516,171 @@ function toWorktreeLocation(record: WorktreeRecord) {
 
 function agentEvidence(agent: AgentOutcome) {
   if (agent.status === 'completed') {
-    return { summary: agent.summary, model: agent.model }
+    return { summary: agent.summary.slice(0, MAX_SUMMARY_CHARS), model: agent.model }
   }
 
   return {
     agentError: agent.error,
-    ...(agent.workerErrorName === undefined ? {} : { workerErrorName: agent.workerErrorName }),
-    ...(agent.workerErrorMessage === undefined ? {} : { workerErrorMessage: agent.workerErrorMessage }),
     ...(agent.model === undefined ? {} : { model: agent.model })
   }
 }
 
-export function createDevelopmentExecutor(
-  options: DevelopmentExecutorOptions,
-  dependencies: DevelopmentExecutorDependencies = {}
-) {
-  const taskTimeoutMs = options.taskTimeoutMs ?? 20 * 60 * 1000
-  const verificationTimeoutMs = options.verificationTimeoutMs ?? 5 * 60 * 1000
-  const agentDir = options.agentDir ?? path.join(os.homedir(), '.pi', 'agent')
-  const runAgent = dependencies.runAgent ?? ((input: PiWorkerInput) => {
-    return runPiWorker(input)
-  })
-  const runVerification = dependencies.runVerification ?? runVerificationCommand
-  const developmentModel = options.developmentModel ?? null
-  const modelSource = developmentModel === null ? 'pi-settings' : 'araya-config'
-  validateTimeout(taskTimeoutMs, 'taskTimeoutMs')
-  validateTimeout(verificationTimeoutMs, 'verificationTimeoutMs')
+export async function collectDevelopmentResult(
+  input: DevelopmentResultInput,
+  dependencies: DevelopmentResultDependencies
+): Promise<DevelopmentResult> {
+  validateTimeout(input.verificationTimeoutMs, 'verificationTimeoutMs')
+  const { taskKey, devRoot, stateDir, agent, verificationTimeoutMs } = input
 
-  const runner: DevelopmentTaskRunner = async (opportunity) => {
-    const taskKey = computeTaskKey(opportunity.id)
-    let devRoot = options.devRoot
-
-    function fail(failureReason: FailureReason, extra: Record<string, unknown> = {}) {
-      const execution: DevelopmentExecution = {
-        status: 'failed',
-        evidence: { taskKey, devRoot, outcome: 'failed', failureReason, worktrees: [], ...extra }
-      }
-
-      return execution
+  function fail(failureReason: FailureReason, extra: Record<string, unknown> = {}) {
+    const developmentResult: DevelopmentResult = {
+      status: 'failed',
+      evidence: { taskKey, devRoot, outcome: 'failed', failureReason, worktrees: [], ...extra }
     }
 
-    let task: string
+    return developmentResult
+  }
 
-    try {
-      task = validateOpportunity(opportunity)
-    } catch (error) {
-      return fail('invalid_task', { failureDetail: describeError(error) })
+  let state: Awaited<ReturnType<typeof readTaskState>>
+
+  try {
+    state = await readTaskState({ devRoot, stateDir, taskKey })
+  } catch (error) {
+    return fail('task_state_invalid', { ...agentEvidence(agent), failureDetail: describeError(error) })
+  }
+
+  const diffs: DiffEvidence[] = []
+
+  try {
+    const git: GitContext = {
+      executable: dependencies.gitExecutable ?? await findGitExecutable(),
+      env: createGitEnv(input.env),
+      run: dependencies.runGit
     }
+    let diffBudget = MAX_DIFF_BYTES
 
-    const devRootReal = await resolveDevRoot(options.devRoot)
-
-    if (devRootReal === undefined) {
-      return fail('dev_root_missing', { failureDetail: `${options.devRoot} is not a directory` })
+    for (const record of state.worktrees) {
+      const diff = await collectWorktreeDiff(git, record, diffBudget)
+      diffBudget = Math.max(0, diffBudget - Buffer.byteLength(diff.diff))
+      diffs.push(diff)
     }
-
-    devRoot = devRootReal
-    let stateDir: string
-
-    try {
-      stateDir = await createTaskState(options.dataDir, taskKey)
-    } catch (error) {
-      if (error instanceof Error && error.message.startsWith('task_state_already_exists')) {
-        return fail('task_state_already_exists', { failureDetail: describeError(error) })
-      }
-
-      throw error
-    }
-
-    let agent: AgentOutcome
-
-    try {
-      const result = await runAgent({
-        devRoot,
-        stateDir,
-        taskKey,
-        agentDir,
-        title: opportunity.title,
-        task,
-        timeoutMs: taskTimeoutMs,
-        model: developmentModel,
-        env: options.env
-      })
-      agent = {
-        status: 'completed',
-        summary: result.summary.slice(0, MAX_SUMMARY_CHARS),
-        model: { ...result.model, source: modelSource }
-      }
-    } catch (error) {
-      if (isTerminationUnconfirmed(error)) {
-        // 終了を確認できない worker が worktree を変更し続けるかもしれないため、差分も検証も扱わない
-        return fail('termination_unconfirmed', { agentError: 'termination_unconfirmed', terminationConfirmed: false })
-      }
-
-      const code = getErrorCode(error)
-      const workerErrorName = getStringProperty(error, 'workerErrorName')
-      const workerErrorMessage = getStringProperty(error, 'workerErrorMessage')
-      // session の model が決まる前の失敗、timeout、不正な出力などでは worker は model を報告しない
-      const workerModel = error instanceof Error && 'workerModel' in error ? parseSessionModel(error.workerModel) : undefined
-      agent = {
-        status: code === 'agent_timeout' ? 'timeout' : 'failed',
-        error: code,
-        ...(workerErrorName === undefined ? {} : { workerErrorName }),
-        ...(workerErrorMessage === undefined ? {} : { workerErrorMessage }),
-        ...(workerModel === undefined ? {} : { model: { ...workerModel, source: modelSource } })
-      }
-    }
-
-    let state: Awaited<ReturnType<typeof readTaskState>>
-
-    try {
-      state = await readTaskState({ devRoot, stateDir, taskKey })
-    } catch (error) {
-      return fail('task_state_invalid', { ...agentEvidence(agent), failureDetail: describeError(error) })
-    }
-
-    const diffs: DiffEvidence[] = []
-
-    try {
-      const git = { executable: dependencies.gitExecutable ?? await findGitExecutable(), env: createGitEnv(options.env) }
-      let diffBudget = MAX_DIFF_BYTES
-
-      for (const record of state.worktrees) {
-        const diff = await collectWorktreeDiff(git, record, diffBudget)
-        diffBudget = Math.max(0, diffBudget - Buffer.byteLength(diff.diff))
-        diffs.push(diff)
-      }
-    } catch (error) {
-      // 差分の収集に使う git の終了を確認できない場合も、差分の収集の失敗として扱う
-      return fail('evidence_collection_failed', {
-        ...agentEvidence(agent),
-        failureDetail: describeError(error),
-        worktrees: state.worktrees.map(toWorktreeLocation)
-      })
-    }
-
-    const changed = state.worktrees.map((_record, index) => {
-      return (diffs[index]?.changedFiles.length ?? 0) > 0
+  } catch (error) {
+    // 差分の収集に使う git の終了を確認できない場合も、差分の収集の失敗として扱う
+    return fail('evidence_collection_failed', {
+      ...agentEvidence(agent),
+      failureDetail: describeError(error),
+      worktrees: state.worktrees.map(toWorktreeLocation)
     })
-    const anyChanged = changed.includes(true)
-    let verificationUnconfirmed = false
-    const worktrees = []
+  }
 
-    for (const [index, record] of state.worktrees.entries()) {
-      const diff = diffs[index]
+  const changed = state.worktrees.map((_record, index) => {
+    return (diffs[index]?.changedFiles.length ?? 0) > 0
+  })
+  const anyChanged = changed.includes(true)
+  let verificationUnconfirmed = false
+  const worktrees = []
 
-      if (diff === undefined) {
+  for (const [index, record] of state.worktrees.entries()) {
+    const diff = diffs[index]
+
+    if (diff === undefined) {
+      continue
+    }
+
+    const registered = state.verifications.filter((verification) => {
+      return verification.repository === record.repository
+    })
+    const verifications: VerificationEvidence[] = []
+
+    for (const verification of registered) {
+      if (agent.status !== 'completed') {
+        verifications.push(notRun(verification, agent.status === 'timeout' ? 'agent_timeout' : 'agent_failed'))
         continue
       }
 
-      const registered = state.verifications.filter((verification) => {
-        return verification.repository === record.repository
-      })
-      const verifications: VerificationEvidence[] = []
-
-      for (const verification of registered) {
-        if (agent.status !== 'completed') {
-          verifications.push(notRun(verification, agent.status === 'timeout' ? 'agent_timeout' : 'agent_failed'))
-          continue
-        }
-
-        if (changed[index] !== true) {
-          verifications.push(notRun(verification, 'no_changes'))
-          continue
-        }
-
-        if (verificationUnconfirmed) {
-          verifications.push(notRun(verification, 'previous_termination_unconfirmed'))
-          continue
-        }
-
-        const cwd = path.join(record.worktreePath, verification.cwd)
-        const cwdProblem = await checkVerificationCwd(cwd, record.worktreePath)
-
-        if (cwdProblem !== undefined) {
-          verifications.push({ ...notRun(verification, cwdProblem), status: 'failed' })
-          continue
-        }
-
-        let result: VerificationCommandResult
-
-        try {
-          result = await runVerification({
-            command: verification.command,
-            cwd,
-            env: options.env,
-            timeoutMs: verificationTimeoutMs
-          })
-        } catch (error) {
-          verifications.push({ ...notRun(verification, 'verification_error'), status: 'failed', stderr: describeError(error) })
-          continue
-        }
-
-        if (!result.terminationConfirmed) {
-          verificationUnconfirmed = true
-        }
-
-        verifications.push({
-          command: [...verification.command],
-          cwd: verification.cwd,
-          status: result.status,
-          exitCode: result.exitCode,
-          signal: result.signal,
-          stdout: result.stdout,
-          stderr: result.stderr,
-          ...(result.reason === undefined ? {} : { reason: result.reason })
-        })
+      if (changed[index] !== true) {
+        verifications.push(notRun(verification, 'no_changes'))
+        continue
       }
 
-      worktrees.push(toWorktreeEvidence(record, diff, verifications))
-    }
+      if (verificationUnconfirmed) {
+        verifications.push(notRun(verification, 'previous_termination_unconfirmed'))
+        continue
+      }
 
-    const failureReason: FailureReason | undefined = verificationUnconfirmed
-      ? 'termination_unconfirmed'
-      : agent.status === 'timeout'
-        ? 'agent_timeout'
-        : agent.status === 'failed'
-          ? 'agent_failed'
-          : !anyChanged
-            ? 'no_changes'
-            : worktrees.some((worktree, index) => {
-              return changed[index] === true && worktree.verifications.length === 0
-            })
-              ? 'verification_missing'
-              : worktrees.some((worktree) => {
-                return worktree.verifications.some((verification) => {
-                  return verification.status !== 'passed' && verification.status !== 'not_run'
-                })
-              })
-                ? 'verification_failed'
-                : undefined
+      const cwd = path.join(record.worktreePath, verification.cwd)
+      const cwdProblem = await checkVerificationCwd(cwd, record.worktreePath)
 
-    if (failureReason !== undefined) {
-      return fail(failureReason, {
-        ...agentEvidence(agent),
-        worktrees,
-        ...(verificationUnconfirmed ? { terminationConfirmed: false } : {})
+      if (cwdProblem !== undefined) {
+        verifications.push({ ...notRun(verification, cwdProblem), status: 'failed' })
+        continue
+      }
+
+      let result: VerificationCommandResult
+
+      try {
+        result = await dependencies.runVerification({
+          command: verification.command,
+          cwd,
+          env: input.env,
+          timeoutMs: verificationTimeoutMs
+        })
+      } catch (error) {
+        verifications.push({ ...notRun(verification, 'verification_error'), status: 'failed', stderr: describeError(error) })
+        continue
+      }
+
+      if (!result.terminationConfirmed) {
+        verificationUnconfirmed = true
+      }
+
+      verifications.push({
+        command: [...verification.command],
+        cwd: verification.cwd,
+        status: result.status,
+        exitCode: result.exitCode,
+        signal: result.signal,
+        stdout: result.stdout,
+        stderr: result.stderr,
+        ...(result.reason === undefined ? {} : { reason: result.reason })
       })
     }
 
-    const execution: DevelopmentExecution = {
-      status: 'completed',
-      evidence: { taskKey, devRoot, outcome: 'completed', ...agentEvidence(agent), worktrees }
-    }
-
-    return execution
+    worktrees.push(toWorktreeEvidence(record, diff, verifications))
   }
 
-  return runner
+  const failureReason: FailureReason | undefined = verificationUnconfirmed
+    ? 'termination_unconfirmed'
+    : agent.status === 'timeout'
+      ? 'agent_timeout'
+      : agent.status === 'failed'
+        ? 'agent_failed'
+        : !anyChanged
+          ? 'no_changes'
+          : worktrees.some((worktree, index) => {
+            return changed[index] === true && worktree.verifications.length === 0
+          })
+            ? 'verification_missing'
+            : worktrees.some((worktree) => {
+              return worktree.verifications.some((verification) => {
+                return verification.status !== 'passed' && verification.status !== 'not_run'
+              })
+            })
+              ? 'verification_failed'
+              : undefined
+
+  if (failureReason !== undefined) {
+    return fail(failureReason, {
+      ...agentEvidence(agent),
+      worktrees,
+      ...(verificationUnconfirmed ? { terminationConfirmed: false } : {})
+    })
+  }
+
+  const developmentResult: DevelopmentResult = {
+    status: 'completed',
+    evidence: { taskKey, devRoot, outcome: 'completed', ...agentEvidence(agent), worktrees }
+  }
+
+  return developmentResult
 }

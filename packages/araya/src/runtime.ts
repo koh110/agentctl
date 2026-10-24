@@ -13,8 +13,6 @@ import {
 } from '@earendil-works/pi-durable'
 
 import { openControlPlane, type ControlPlane } from './control-plane.ts'
-import { createDevelopmentExecutor, type DevelopmentTaskRunner } from './development.ts'
-import type { DevelopmentModel } from './development-model.ts'
 import { createArayaTasks, TASK_NAMES, type ArayaTasks, type ScoutInput, type ScoutResult } from './tasks.ts'
 
 export const MAIN_GOAL_ID = 'araya:goal:main'
@@ -46,38 +44,22 @@ export async function createArayaModelRuntime(agentDir?: string) {
 export async function openArayaRuntime(
   config: {
     controlPlanePath: string
-    dataDir: string
-    devRoot: string
-    env: Readonly<Record<string, string | undefined>>
     inboxDir: string
     piDurablePath: string
     intervalMs: number
     piAgentDir?: string
-    developmentTimeoutMs: number
-    verificationTimeoutMs: number
-    developmentModel: DevelopmentModel | null
   },
-  options: { resumeTasks?: boolean; developmentRunner?: DevelopmentTaskRunner } = {}
+  options: { resumeTasks?: boolean } = {}
 ): Promise<ArayaRuntime> {
   await ensureParentDir(config.controlPlanePath)
   await ensureParentDir(config.piDurablePath)
 
   const controlPlane = openControlPlane(config.controlPlanePath)
-  const developmentRunner = options.developmentRunner ?? createDevelopmentExecutor({
-    devRoot: config.devRoot,
-    dataDir: config.dataDir,
-    env: config.env,
-    ...(config.piAgentDir === undefined ? {} : { agentDir: config.piAgentDir }),
-    taskTimeoutMs: config.developmentTimeoutMs,
-    verificationTimeoutMs: config.verificationTimeoutMs,
-    developmentModel: config.developmentModel
-  })
   const tasks = createArayaTasks(
     controlPlane,
     config.inboxDir,
     MAIN_GOAL_ID,
-    config.intervalMs,
-    developmentRunner
+    config.intervalMs
   )
 
   const { openNodeSqliteStorage } = await import('@earendil-works/pi-durable/storage/sqlite/node')

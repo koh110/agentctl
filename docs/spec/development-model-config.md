@@ -1,5 +1,7 @@
 # 設定ファイルによる開発 agent の model 指定
 
+> 注記: この文書のうち、worker の入力と出力で model を受け渡す部分は、worker を撤去する手順で撤去し、[Task の台帳と SHIKI の実行](task-ledger-and-shiki-runner.md)の仕様に置き換えた。設定ファイルの形と検証は、この文書を基準のままにする。
+
 ## 概要
 
 開発課題を実行する Pi agent の model と thinking level を、Araya の設定ファイルで指定できるようにする。指定した model が使えないときは別の model に切り替えず、課題を失敗にする。どの model を使ったかを evidence に記録する。将来、利用上限（limit）に達したときの fallback model を同じ設定ファイルへ追加できる形にする。

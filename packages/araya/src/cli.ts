@@ -32,7 +32,7 @@ function printHelp() {
     状態領域と seed inbox を作成し、初期状態を status.json へ書き出す。
 
   araya tick
-    1回だけ due goal を処理し、開発課題は開発 root で実装し、repository ごとの worktree で検証する。
+    1回だけ due goal を処理する。inbox の開発課題は実行せずに blocked にする（Task の台帳と runner を実装中）。
 
   araya status
     control plane と live task graph を読み、status.json へ書き出す。
@@ -48,7 +48,7 @@ function printHelp() {
 
 設定ファイル:
   <ARAYA_DATA_DIR>/config.json（既定: ~/.araya/config.json）
-    開発 agent の model と thinking level を指定する。subcommand の起動時に1回だけ読む。
+    runner（実装中）で使う開発 agent の model と thinking level を指定する。subcommand の起動時に1回だけ読む。
 
 環境変数:
   ARAYA_DATA_DIR

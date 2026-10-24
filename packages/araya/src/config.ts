@@ -51,7 +51,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
       maximum: 60 * 60 * 1000
     }),
     developmentModel: NO_DEVELOPMENT_MODEL,
-    // 子 process（development worker、検証コマンド、git）に引き継ぐ環境変数
+    // runner（実装中）が子 process（検証コマンド、git など）に引き継ぐ環境変数。今はどこからも使っていない
     env: { ...env }
   }
 }

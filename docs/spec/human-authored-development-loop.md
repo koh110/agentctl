@@ -1,5 +1,7 @@
 # 人が投入する開発課題を処理する自動ループ
 
+> 注記: この文書のうち、worker（Pi の SDK の session）で課題を動かす部分は、worker を撤去する手順で撤去し、[Task の台帳と SHIKI の実行](task-ledger-and-shiki-runner.md)の仕様（Task の台帳と常駐する runner）に置き換えた。SHIKI の作業と完了の判定（worktree、検証の登録と実行、結果の判定）は、この文書を基準のままにする。inbox の development の課題は、今は実行されずに `blocked` になる。
+
 ## 概要
 
 Araya の利用者が JSONL inbox に開発課題を書くことが、実行開始の承認になる。別の approve 操作は不要。Araya は due tick で課題を1件選び、Pi coding agent を開発 root（既定 `~/dev`）で動かす。agent は課題に必要な repository を自分で判断し（複数でもよい）、変更する repository ごとに、その repository の `.worktree/` 配下へ課題用の worktree を作って実装する。agent の終了後、Araya は agent が登録した検証コマンドを最終状態の worktree で実行し、worktree ごとの差分と検証結果を記録して止まる。
